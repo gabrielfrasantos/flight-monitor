@@ -1,0 +1,11 @@
+# Secrets — never commit
+.env
+
+# Runtime data (prices, logs, personal history)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
