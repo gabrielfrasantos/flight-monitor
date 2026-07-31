@@ -49,11 +49,16 @@ from fast_flights.fetcher import URL
 from fast_flights.parser import parse
 
 # --------------------------------------------------------------------------- #
-# Fixed (non-parameter) config
+# Route config -- these are DEFAULTS; overridden per-run by CLI args in main().
 # --------------------------------------------------------------------------- #
 ORIGIN = "AMS"
 DESTINATION = "GRU"
-AIRLINE = "KL"                 # KLM carrier code
+AIRLINE = "KL"                 # carrier code; "" or "ANY" = any airline
+MAX_STOPS = 0                  # 0 = direct only; 1 = up to one stopover; etc.
+
+# --------------------------------------------------------------------------- #
+# Fixed (non-parameter) config
+# --------------------------------------------------------------------------- #
 CURRENCIES = ["EUR", "BRL"]
 ADULTS = 1
 SEAT = "economy"
@@ -81,7 +86,15 @@ LOG_FILE = DATA_DIR / "monitor.log"
 # Parameters (CLI, with defaults)
 # --------------------------------------------------------------------------- #
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="KLM-direct AMS<->GRU price monitor.")
+    p = argparse.ArgumentParser(description="Round-trip flight price monitor.")
+    p.add_argument("--origin", default=ORIGIN,
+                   help=f"Origin airport IATA code (default {ORIGIN}).")
+    p.add_argument("--destination", default=DESTINATION,
+                   help=f"Destination airport IATA code (default {DESTINATION}).")
+    p.add_argument("--airline", default=AIRLINE,
+                   help=f"Airline carrier code, or ANY for all (default {AIRLINE}).")
+    p.add_argument("--max-stops", type=int, default=MAX_STOPS,
+                   help=f"Max stopovers per leg; 0 = direct (default {MAX_STOPS}).")
     p.add_argument("--start", default="2026-12-01",
                    help="First outbound date, YYYY-MM-DD (default 2026-12-01).")
     p.add_argument("--end", default="2027-01-28",
@@ -133,24 +146,28 @@ def make_client() -> Client:
 
 
 def build_query(depart: dt.date, ret: dt.date, currency: str):
+    airlines = [AIRLINE] if AIRLINE and AIRLINE.upper() != "ANY" else None
     return create_query(
         flights=[
             FlightQuery(date=depart.isoformat(), from_airport=ORIGIN,
-                        to_airport=DESTINATION, max_stops=0, airlines=[AIRLINE]),
+                        to_airport=DESTINATION, max_stops=MAX_STOPS, airlines=airlines),
             FlightQuery(date=ret.isoformat(), from_airport=DESTINATION,
-                        to_airport=ORIGIN, max_stops=0, airlines=[AIRLINE]),
+                        to_airport=ORIGIN, max_stops=MAX_STOPS, airlines=airlines),
         ],
         trip="round-trip", seat=SEAT, passengers=Passengers(adults=ADULTS),
-        currency=currency, max_stops=0,
+        currency=currency, max_stops=MAX_STOPS,
     )
 
 
-def is_direct_klm(f) -> bool:
-    """Single-leg KLM flight AMS->GRU (belt & suspenders on top of API filter)."""
-    if len(f.flights) != 1 or f.type != AIRLINE:
+def is_valid_offer(f) -> bool:
+    """Confirm the offer honors the stops/airline/endpoint filters (belt & suspenders)."""
+    if len(f.flights) > MAX_STOPS + 1:
         return False
-    leg = f.flights[0]
-    return leg.from_airport.code == ORIGIN and leg.to_airport.code == DESTINATION
+    if AIRLINE and AIRLINE.upper() != "ANY" and f.type != AIRLINE:
+        return False
+    first, last = f.flights[0], f.flights[-1]
+    return (first.from_airport.code == ORIGIN
+            and last.to_airport.code == DESTINATION)
 
 
 def cheapest_offer(client: Client, depart: dt.date, ret: dt.date, currency: str):
@@ -159,7 +176,7 @@ def cheapest_offer(client: Client, depart: dt.date, ret: dt.date, currency: str)
     if "consent.google.com" in html[:400]:
         raise RuntimeError("Hit Google consent wall (refresh SOCS_COOKIE).")
     # fast-flights' parser raises (TypeError/IndexError) when Google returns an
-    # empty result set -- i.e. no KLM-direct combo for this date pair. Treat as
+    # empty result set -- i.e. no matching combo for this date pair. Treat as
     # "no availability", not an error.
     try:
         offers = list(parse(html))
@@ -167,7 +184,7 @@ def cheapest_offer(client: Client, depart: dt.date, ret: dt.date, currency: str)
         return None
     best = None
     for f in offers:
-        if not is_direct_klm(f) or f.price is None:
+        if not is_valid_offer(f) or f.price is None:
             continue
         try:
             price = float(f.price)
@@ -287,6 +304,7 @@ def daterange(start: dt.date, end: dt.date, step: int):
 
 
 def main(argv=None) -> int:
+    global ORIGIN, DESTINATION, AIRLINE, MAX_STOPS
     load_dotenv()
     args = parse_args(argv)
     # Route the report to the real recipient without hardcoding it in the repo:
@@ -296,12 +314,21 @@ def main(argv=None) -> int:
                       or os.environ.get("GMAIL_USER")
                       or args.email)
 
+    # Apply route parameters (origin / destination / airline / stopovers).
+    ORIGIN = args.origin.upper()
+    DESTINATION = args.destination.upper()
+    AIRLINE = args.airline
+    MAX_STOPS = args.max_stops
+    airline_label = AIRLINE if (AIRLINE and AIRLINE.upper() != "ANY") else "any airline"
+    stops_label = "direct" if MAX_STOPS == 0 else f"<={MAX_STOPS} stop(s)"
+    route = f"{ORIGIN}<->{DESTINATION} {airline_label} {stops_label}"
+
     start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end)
     stay = args.stay_days
 
     client = make_client()
-    log(f"Run start. {ORIGIN}<->{DESTINATION} KLM direct, {stay}n stay, "
+    log(f"Run start. {route}, {stay}n stay, "
         f"outbound {start}..{end} step {args.step_days}d, currencies {CURRENCIES}.")
 
     all_rows: list[dict] = []
@@ -335,12 +362,12 @@ def main(argv=None) -> int:
                 run_best[currency] = row
 
     if not all_rows or "EUR" not in run_best:
-        log(f"No KLM direct offers found this run. ({errors} errors)")
+        log(f"No {route} offers found this run. ({errors} errors)")
         # Still notify so silence never hides a scraper break.
         if not args.no_email:
-            send_email(args.email, "[WARN] KLM AMS-GRU monitor: no offers found",
-                       f"Run at {dt.datetime.now():%Y-%m-%d %H:%M} found no KLM "
-                       f"direct offers ({errors} errors). Possible scraper/consent "
+            send_email(args.email, f"[WARN] {ORIGIN}-{DESTINATION} monitor: no offers found",
+                       f"Run at {dt.datetime.now():%Y-%m-%d %H:%M} found no {route} "
+                       f"offers ({errors} errors). Possible scraper/consent "
                        f"issue — check monitor.log.")
         return 0
 
@@ -365,7 +392,7 @@ def main(argv=None) -> int:
 
     # ---- Report ----
     emoji = LIGHT_EMOJI.get(light, "")
-    subject = (f"[{light}] KLM AMS-GRU EUR {eur['price']:.0f} "
+    subject = (f"[{light}] {ORIGIN}-{DESTINATION} EUR {eur['price']:.0f} "
                f"(out {eur['depart']})")
 
     baseline_line = (f"Baseline: rolling median of past runs = €{med:.0f} "
@@ -376,7 +403,7 @@ def main(argv=None) -> int:
     newlow = " *NEW ALL-TIME LOW*" if "EUR" in improved else ""
 
     body = "\n".join([
-        f"KLM direct, Amsterdam (AMS) <-> Sao Paulo (GRU), {stay}-night stay.",
+        f"{route}, {ORIGIN} <-> {DESTINATION}, {stay}-night stay.",
         f"Outbound window scanned: {start} .. {end} (step {args.step_days}d).",
         "",
         f"TRAFFIC LIGHT: {emoji} {light}   [{mode}]",

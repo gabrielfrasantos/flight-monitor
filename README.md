@@ -5,6 +5,9 @@ Sweeps every outbound date **01-12-2026 → 28-01-2027** (step 1 day), each with
 lowest, classifies it with a **traffic light**, and **emails** the report.
 Runs **twice a day** via Windows Task Scheduler.
 
+Origin, destination, airline, and stopovers are all **configurable** (see
+[Parameters](#parameters)) — AMS⇄GRU/KLM/direct is just the scheduled default.
+
 Data: Google Flights via `fast-flights` (no API key, free).
 
 ## Traffic light
@@ -45,29 +48,45 @@ You should get one email. (`--no-email` runs without sending.)
 ## Scheduler (already registered)
 
 Task **`FlightMonitor_AMS_GRU`** runs daily at **08:00** and **20:00** as your
-Windows user. Manage it:
+Windows user, hidden (via `pythonw.exe`, no console window). It pins
+`--origin AMS --destination GRU --airline KL --max-stops 0`.
+
+**Auto-cleanup:** the triggers stop after the last outbound date (end boundary
+2027-01-29) and Windows deletes the task ~1 day later
+(`DeleteExpiredTaskAfter = P1D`) — no manual removal needed.
+
+Manage it:
 ```powershell
 Get-ScheduledTask FlightMonitor_AMS_GRU            # status
 Start-ScheduledTask FlightMonitor_AMS_GRU          # run now
 Get-ScheduledTaskInfo FlightMonitor_AMS_GRU        # last/next run, result
-Unregister-ScheduledTask FlightMonitor_AMS_GRU -Confirm:$false   # remove
+Unregister-ScheduledTask FlightMonitor_AMS_GRU -Confirm:$false   # remove early
 ```
 
 ## Parameters
 
 ```
 python flight_monitor.py [options]
-  --start YYYY-MM-DD     first outbound date   (default 2026-12-01)
-  --end   YYYY-MM-DD     last outbound date    (default 2027-01-28)
-  --stay-days N          nights in Brazil      (default 15)
-  --step-days N          gap between dates      (default 1)
-  --email ADDR           report recipient      (default from REPORT_EMAIL env, else placeholder)
-  --low-eur N            fixed-mode LOW cutoff  (default 1000)
-  --high-eur N           fixed-mode HIGH cutoff (default 1250)
+  --origin IATA          origin airport         (default AMS)
+  --destination IATA     destination airport    (default GRU)
+  --airline CODE         carrier code, ANY=all  (default KL)
+  --max-stops N          0 = direct only         (default 0)
+  --start YYYY-MM-DD     first outbound date    (default 2026-12-01)
+  --end   YYYY-MM-DD     last outbound date     (default 2027-01-28)
+  --stay-days N          nights at destination  (default 15)
+  --step-days N          gap between dates       (default 1)
+  --email ADDR           report recipient       (default from REPORT_EMAIL env, else placeholder)
+  --low-eur N            fixed-mode LOW cutoff   (default 1000)
+  --high-eur N           fixed-mode HIGH cutoff  (default 1250)
   --no-email             log only, don't send
 ```
-Scheduler uses the defaults (no args). Change the defaults in `parse_args()` or
-edit the task's `-Argument`.
+Examples:
+```powershell
+# Any airline, up to 1 stop, London <-> New York, 7 nights
+python flight_monitor.py --origin LHR --destination JFK --airline ANY --max-stops 1 --stay-days 7
+```
+The scheduled task pins `--origin AMS --destination GRU --airline KL --max-stops 0`
+in its `-Argument`; edit the task to change what runs automatically.
 
 ## Output (in `data\`)
 
