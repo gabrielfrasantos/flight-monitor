@@ -158,17 +158,26 @@ def cheapest_offer(client: Client, depart: dt.date, ret: dt.date, currency: str)
     html = client.get(URL, params=q.params()).text
     if "consent.google.com" in html[:400]:
         raise RuntimeError("Hit Google consent wall (refresh SOCS_COOKIE).")
+    # fast-flights' parser raises (TypeError/IndexError) when Google returns an
+    # empty result set -- i.e. no KLM-direct combo for this date pair. Treat as
+    # "no availability", not an error.
+    try:
+        offers = list(parse(html))
+    except (TypeError, IndexError, AttributeError):
+        return None
     best = None
-    for f in parse(html):
-        if not is_direct_klm(f):
+    for f in offers:
+        if not is_direct_klm(f) or f.price is None:
             continue
-        price = float(f.price)
+        try:
+            price = float(f.price)
+        except (TypeError, ValueError):
+            continue
         if best is None or price < best["price"]:
             leg = f.flights[0]
-            best = {
-                "price": price, "currency": currency,
-                "out_dep_time": f"{leg.departure.time[0]:02d}:{leg.departure.time[1]:02d}",
-            }
+            t = leg.departure.time if leg.departure else None
+            dep = f"{t[0]:02d}:{t[1]:02d}" if t else "--:--"
+            best = {"price": price, "currency": currency, "out_dep_time": dep}
     return best
 
 
@@ -278,8 +287,14 @@ def daterange(start: dt.date, end: dt.date, step: int):
 
 
 def main(argv=None) -> int:
-    args = parse_args(argv)
     load_dotenv()
+    args = parse_args(argv)
+    # Route the report to the real recipient without hardcoding it in the repo:
+    # REPORT_EMAIL wins, else the Gmail account owner, else the placeholder.
+    if args.email == "you@example.com":
+        args.email = (os.environ.get("REPORT_EMAIL")
+                      or os.environ.get("GMAIL_USER")
+                      or args.email)
 
     start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end)
