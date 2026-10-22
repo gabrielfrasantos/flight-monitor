@@ -20,7 +20,8 @@ def window(data_dir):
 
 
 def test_window_shows_saved_settings_and_saves_back(data_dir, window):
-    assert window._values() == {**fm.DEFAULTS, "airline": "KL"}
+    values = window._values()
+    assert values == {k: fm.DEFAULTS[k] for k in values}
 
     window._airline_combo.setCurrentText("KL,af")
     window._stops_combo.setCurrentIndex(window._stops_combo.findData("any"))
@@ -64,3 +65,153 @@ def test_bad_saved_dates_fall_back_to_defaults(data_dir):
         w.shutdown()
         w.deleteLater()
         app.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# Email settings dialog
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def no_message_boxes(monkeypatch):
+    shown = []
+    for name in ("information", "warning"):
+        monkeypatch.setattr(
+            gui.QMessageBox, name, lambda *a, n=name: shown.append((n, a[-1])), raising=True
+        )
+    return shown
+
+
+def test_email_dialog_saves_account_and_policy(window, no_message_boxes):
+    dialog = gui.EmailDialog(window)
+    dialog._user_edit.setText("me@gmail.com")
+    dialog._password_edit.setText("abcd efgh ijkl mnop")
+    dialog._to_edit.setText("you@example.com")
+    dialog._when_combo.setCurrentIndex(dialog._when_combo.findData("low"))
+    dialog.accept()
+    cfg = fm.email_config()
+    assert (cfg.user, cfg.recipient, cfg.port) == ("me@gmail.com", "you@example.com", 465)
+    assert fm.load_settings()["email_when"] == "low"
+
+
+def test_email_dialog_test_button(window, monkeypatch, no_message_boxes):
+    sent = []
+    monkeypatch.setattr(fm, "send_email", lambda to, subject, body, cfg: sent.append((to, cfg)))
+    dialog = gui.EmailDialog(window)
+    dialog._send_test()
+    assert sent == [] and no_message_boxes[-1][0] == "warning"  # no account yet
+    dialog._user_edit.setText("me@gmail.com")
+    dialog._password_edit.setText("pw")
+    dialog._send_test()
+    assert sent[0][0] == "me@gmail.com" and no_message_boxes[-1][0] == "information"
+    assert fm.email_config().user == ""  # testing doesn't save
+
+
+# --------------------------------------------------------------------------- #
+# Automatic runs
+# --------------------------------------------------------------------------- #
+def test_schedule_controls_save_immediately(window, no_message_boxes):
+    window._times_edit.setText("21:30,7:05")
+    window._auto_check.setChecked(True)
+    s = fm.load_settings()
+    assert s["auto_run"] is True and s["run_times"] == "07:05,21:30"
+    assert window._next_label.text().startswith("next:")
+    window._times_edit.setText("soon")
+    window._save_schedule()
+    assert no_message_boxes[-1][0] == "warning"
+    assert fm.load_settings()["run_times"] == "07:05,21:30"
+
+
+@pytest.fixture
+def started(window, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        window._controller, "start", lambda search, engine, **kw: calls.append((search, kw))
+    )
+    return calls
+
+
+def test_due_slot_starts_a_recorded_emailed_run(window, monkeypatch, started):
+    fm.save_settings({"auto_run": True, "email_when": "low", "end": "2099-01-31"})
+    monkeypatch.setattr(fm, "due_run", lambda now, times, last: now)
+    window._tick_schedule()
+    ((search, kw),) = started
+    assert (kw["record"], kw["send"], kw["email_when"]) == (True, True, "low")
+    assert search.origin == "AMS"
+    assert "last_auto_run" in fm.load_state()
+
+
+def test_no_run_when_off_or_window_over(window, monkeypatch, started):
+    monkeypatch.setattr(fm, "due_run", lambda now, times, last: now)
+    window._tick_schedule()  # auto_run off in a checkout by default
+    fm.save_settings({"auto_run": True, "start": "2020-01-01", "end": "2020-01-31"})
+    window._tick_schedule()
+    assert started == []
+
+
+class FakeTray:
+    def __init__(self):
+        self.notes = []
+
+    def notify(self, title, message, warning=False):
+        self.notes.append(message)
+
+    def sync_menu(self):
+        pass
+
+    def setToolTip(self, text):
+        self.tooltip = text
+
+    def show_window(self):
+        pass
+
+
+def test_close_hides_to_tray(window):
+    tray = FakeTray()
+    window.set_tray(tray)
+    window.show()
+    window.close()
+    assert not window.isVisible() and "tray" in tray.notes[0]
+
+
+# --------------------------------------------------------------------------- #
+# Desktop integration
+# --------------------------------------------------------------------------- #
+def test_icon_and_version_parsing():
+    import desktop
+
+    assert not desktop.render_icon(32).isNull()
+    assert desktop.parse_version("v0.10.1") > desktop.parse_version("0.9.9")
+    assert desktop.parse_version("garbage") == (0,)
+
+
+def test_single_instance_hands_over_to_the_running_copy():
+    from PySide6.QtCore import QCoreApplication, QElapsedTimer
+
+    import desktop
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    key = f"flight-monitor-test-{os.getpid()}"
+    first, second = desktop.SingleInstance(key), desktop.SingleInstance(key)
+    shown = []
+    first.activated.connect(lambda: shown.append(True))
+    assert first.already_running() is False
+    assert second.already_running() is True
+    timer = QElapsedTimer()
+    timer.start()
+    while not shown and timer.elapsed() < 3000:
+        QCoreApplication.processEvents()
+    assert shown
+
+    quits = []
+    first.quit_requested.connect(lambda: quits.append(True))
+    assert desktop.SingleInstance(key).send(b"quit") is True
+    timer.restart()
+    while not quits and timer.elapsed() < 3000:
+        QCoreApplication.processEvents()
+    assert quits and len(shown) == 1
+    assert desktop.SingleInstance(f"{key}-nobody").send(b"quit") is False
+    del app
+
+
+def test_smoke_test_passes(data_dir):
+    pytest.importorskip("fli")
+    assert gui.smoke_test() == 0
