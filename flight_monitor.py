@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Flight price monitor: AMS <-> GRU, round trip, direct KLM only.
+Flight price monitor: round trip, by default AMS <-> GRU, direct KLM only.
 
 Each run sweeps every outbound date in the window (default 01-12-2026 ..
 28-01-2027), each with a +STAY nights return, in EUR and BRL, keeps the
-cheapest KLM-direct offer, classifies it with a traffic light
-(LOW / NORMAL / HIGH), and emails the result.
+cheapest offer that honors the route filters, classifies it with a traffic
+light (LOW / NORMAL / HIGH), and emails the result.
+
+Prices come from a selectable engine (--engine; see engines.py or run
+--list-engines). The default "auto" runs the free engines in order, falling
+back to the next one for any currency the previous one found nothing for.
 
 Traffic light ("both" mode):
   - First MIN_HISTORY_RUNS runs: fixed EUR thresholds (--low-eur / --high-eur).
@@ -14,8 +18,8 @@ Traffic light ("both" mode):
       HIGH = current >= median * (1 + BAND)
       else NORMAL
 
-Data source: Google Flights via `fast-flights` (no API key). EU consent wall
-bypassed with a SOCS cookie.
+Defaults: built in (DEFAULTS below) < data/settings.json (written by the GUI's
+"Save as default") < command-line arguments.
 
 Email: Gmail SMTP + App Password. Put creds in a .env file next to this script:
   GMAIL_USER=you@example.com
@@ -23,114 +27,261 @@ Email: Gmail SMTP + App Password. Put creds in a .env file next to this script:
 
 Set the report recipient with --email or the REPORT_EMAIL environment variable.
 
-Run:  python flight_monitor.py            (uses defaults below)
+Run:  python flight_monitor.py            (uses defaults)
       python flight_monitor.py --help     (all overridable parameters)
+      python flight_monitor_gui.py        (the same, from a window)
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import json
+import logging
 import os
-import random
 import smtplib
 import ssl
 import statistics
 import sys
-import time
-import datetime as dt
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from email.mime.text import MIMEText
 from pathlib import Path
+from typing import Any
 
-from primp import Client
-from fast_flights import FlightQuery, create_query, Passengers
-from fast_flights.fetcher import URL
-from fast_flights.parser import parse
+from engines import AUTO, AUTO_ORDER, ENGINES, Offer, Search, sweep
+
+__version__ = "0.1.0"  # x-release-please-version
 
 # --------------------------------------------------------------------------- #
-# Route config -- these are DEFAULTS; overridden per-run by CLI args in main().
+# Defaults -- overridden by data/settings.json, then by CLI args.
 # --------------------------------------------------------------------------- #
-ORIGIN = "AMS"
-DESTINATION = "GRU"
-AIRLINE = "KL"                 # carrier code; "" or "ANY" = any airline
-MAX_STOPS = 0                  # 0 = direct only; 1 = up to one stopover; etc.
+DEFAULTS: dict[str, Any] = {
+    "origin": "AMS",
+    "destination": "GRU",
+    "airline": "KL",  # carrier code(s), comma-separated; "ANY" = all
+    "max_stops": "0",  # 0 = direct only; 1 = up to one stopover; "any"
+    "start": "2026-12-01",
+    "end": "2027-01-28",
+    "stay_days": 15,
+    "step_days": 1,
+    "currencies": "EUR,BRL",
+    "engine": AUTO,
+    "low_eur": 1000.0,
+    "high_eur": 1250.0,
+}
 
 # --------------------------------------------------------------------------- #
 # Fixed (non-parameter) config
 # --------------------------------------------------------------------------- #
-CURRENCIES = ["EUR", "BRL"]
 ADULTS = 1
-SEAT = "economy"
 
-SLEEP_MIN = 1.2               # politeness between requests (seconds)
-SLEEP_MAX = 2.6
-
-MIN_HISTORY_RUNS = 6          # runs of fixed thresholds before auto median
-BAND = 0.10                   # +/-10% band around the median for LOW/HIGH
-
-# Google consent-accept cookie (bypasses consent.google.com EU wall).
-# Refresh if runs abort "consent cookie invalid": accept cookies on google.com
-# in a browser, copy the SOCS cookie value here.
-SOCS_COOKIE = "CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg"
+MIN_HISTORY_RUNS = 6  # runs of fixed thresholds before auto median
+BAND = 0.10  # +/-10% band around the median for LOW/HIGH
 
 HERE = Path(__file__).resolve().parent
+ENV_FILE = HERE / ".env"
 DATA_DIR = HERE / "data"
-HISTORY_CSV = DATA_DIR / "price_history.csv"      # every offer, every run
-RUNS_CSV = DATA_DIR / "run_summary.csv"           # one row per run (for median)
-BEST_JSON = DATA_DIR / "best_prices.json"         # all-time low per currency
+HISTORY_CSV = DATA_DIR / "price_history.csv"  # every offer, every run
+RUNS_CSV = DATA_DIR / "run_summary.csv"  # one row per run (for median)
+BEST_JSON = DATA_DIR / "best_prices.json"  # all-time low per currency
+SETTINGS_JSON = DATA_DIR / "settings.json"  # saved defaults (GUI)
 LOG_FILE = DATA_DIR / "monitor.log"
+
+logger = logging.getLogger("flight_monitor")
 
 
 # --------------------------------------------------------------------------- #
 # Parameters (CLI, with defaults)
 # --------------------------------------------------------------------------- #
-def parse_args(argv=None) -> argparse.Namespace:
+def parse_airlines(text: str) -> tuple[str, ...]:
+    codes = tuple(c.strip().upper() for c in str(text).replace("+", ",").split(",") if c.strip())
+    return () if "ANY" in codes else codes
+
+
+def parse_stops(text) -> int | None:
+    s = str(text).strip().lower()
+    if s in ("", "any", "-1"):
+        return None
+    n = int(s)
+    if n < 0:
+        raise ValueError(f"max stops must be >= 0 or 'any', got {text!r}")
+    return n
+
+
+def parse_currencies(text: str) -> tuple[str, ...]:
+    out = tuple(dict.fromkeys(c.strip().upper() for c in str(text).split(",") if c.strip()))
+    if not out:
+        raise ValueError("at least one currency is needed")
+    return out
+
+
+def load_settings() -> dict:
+    """DEFAULTS overlaid with data/settings.json, if present and readable."""
+    settings = dict(DEFAULTS)
+    if SETTINGS_JSON.exists():
+        try:
+            saved = json.loads(SETTINGS_JSON.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log(f"Ignoring {SETTINGS_JSON.name}: {e}")
+        else:
+            settings.update({k: v for k, v in saved.items() if k in DEFAULTS})
+    if settings["engine"] not in (AUTO, *ENGINES):
+        log(f"Unknown engine {settings['engine']!r} in {SETTINGS_JSON.name}; using {AUTO}.")
+        settings["engine"] = AUTO
+    return settings
+
+
+def save_settings(values: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    keep = {k: values[k] for k in DEFAULTS if k in values}
+    SETTINGS_JSON.write_text(json.dumps(keep, indent=2), encoding="utf-8")
+
+
+def parse_args(argv=None, settings: dict | None = None) -> argparse.Namespace:
+    s = settings if settings is not None else load_settings()
     p = argparse.ArgumentParser(description="Round-trip flight price monitor.")
-    p.add_argument("--origin", default=ORIGIN,
-                   help=f"Origin airport IATA code (default {ORIGIN}).")
-    p.add_argument("--destination", default=DESTINATION,
-                   help=f"Destination airport IATA code (default {DESTINATION}).")
-    p.add_argument("--airline", default=AIRLINE,
-                   help=f"Airline carrier code, or ANY for all (default {AIRLINE}).")
-    p.add_argument("--max-stops", type=int, default=MAX_STOPS,
-                   help=f"Max stopovers per leg; 0 = direct (default {MAX_STOPS}).")
-    p.add_argument("--start", default="2026-12-01",
-                   help="First outbound date, YYYY-MM-DD (default 2026-12-01).")
-    p.add_argument("--end", default="2027-01-28",
-                   help="Last outbound date, YYYY-MM-DD (default 2027-01-28).")
-    p.add_argument("--stay-days", type=int, default=15,
-                   help="Nights in Brazil / return offset (default 15).")
-    p.add_argument("--step-days", type=int, default=1,
-                   help="Days between probed outbound dates (default 1).")
-    p.add_argument("--email", default=os.environ.get("REPORT_EMAIL", "you@example.com"),
-                   help="Recipient for the report (or set REPORT_EMAIL env var).")
-    p.add_argument("--low-eur", type=float, default=1000.0,
-                   help="Fixed-mode: EUR at/below this = LOW (default 1000).")
-    p.add_argument("--high-eur", type=float, default=1250.0,
-                   help="Fixed-mode: EUR at/above this = HIGH (default 1250).")
-    p.add_argument("--no-email", action="store_true",
-                   help="Skip sending email (log only).")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    p.add_argument(
+        "--origin", default=s["origin"], help=f"Origin airport IATA code (default {s['origin']})."
+    )
+    p.add_argument(
+        "--destination",
+        default=s["destination"],
+        help=f"Destination airport IATA code (default {s['destination']}).",
+    )
+    p.add_argument(
+        "--airline",
+        type=parse_airlines,
+        default=s["airline"],
+        help=f"Airline code(s), comma-separated, or ANY for all (default {s['airline']}).",
+    )
+    p.add_argument(
+        "--max-stops",
+        type=parse_stops,
+        default=s["max_stops"],
+        help=f"Max stopovers per leg: 0 = direct, 1, 2, or 'any' (default {s['max_stops']}).",
+    )
+    p.add_argument(
+        "--start",
+        default=s["start"],
+        help=f"First outbound date, YYYY-MM-DD (default {s['start']}).",
+    )
+    p.add_argument(
+        "--end", default=s["end"], help=f"Last outbound date, YYYY-MM-DD (default {s['end']})."
+    )
+    p.add_argument(
+        "--stay-days",
+        type=int,
+        default=s["stay_days"],
+        help=f"Nights at destination / return offset (default {s['stay_days']}).",
+    )
+    p.add_argument(
+        "--step-days",
+        type=int,
+        default=s["step_days"],
+        help=f"Days between probed outbound dates (default {s['step_days']}).",
+    )
+    p.add_argument(
+        "--currencies",
+        type=parse_currencies,
+        default=s["currencies"],
+        help=f"Comma-separated currencies (default {s['currencies']}).",
+    )
+    p.add_argument(
+        "--engine",
+        choices=[AUTO, *ENGINES],
+        default=s["engine"],
+        help=f"Price source (default {s['engine']}); see --list-engines.",
+    )
+    p.add_argument(
+        "--list-engines", action="store_true", help="Show the price engines, free first, and exit."
+    )
+    p.add_argument(
+        "--email",
+        default=os.environ.get("REPORT_EMAIL", "you@example.com"),
+        help="Recipient for the report (or set REPORT_EMAIL env var).",
+    )
+    p.add_argument(
+        "--low-eur",
+        type=float,
+        default=s["low_eur"],
+        help=f"Fixed-mode: EUR at/below this = LOW (default {s['low_eur']:.0f}).",
+    )
+    p.add_argument(
+        "--high-eur",
+        type=float,
+        default=s["high_eur"],
+        help=f"Fixed-mode: EUR at/above this = HIGH (default {s['high_eur']:.0f}).",
+    )
+    p.add_argument("--no-email", action="store_true", help="Skip sending email (log only).")
     return p.parse_args(argv)
+
+
+def build_search(
+    origin: str,
+    destination: str,
+    airlines: tuple[str, ...],
+    max_stops: int | None,
+    start: dt.date,
+    end: dt.date,
+    stay_days: int,
+    step_days: int,
+    currencies: tuple[str, ...],
+) -> Search:
+    """Validated Search; raises ValueError naming the bad field."""
+    origin, destination = origin.strip().upper(), destination.strip().upper()
+    for name, code in (("origin", origin), ("destination", destination)):
+        if len(code) != 3 or not code.isalpha():
+            raise ValueError(f"{name} must be a 3-letter IATA code, got {code!r}")
+    if origin == destination:
+        raise ValueError("origin and destination are the same airport")
+    if start > end:
+        raise ValueError(f"first outbound date {start} is after the last one {end}")
+    if stay_days < 1 or step_days < 1:
+        raise ValueError("stay and step must be at least 1 day")
+    return Search(
+        origin=origin,
+        destination=destination,
+        start=start,
+        end=end,
+        stay_days=stay_days,
+        airlines=airlines,
+        max_stops=max_stops,
+        step_days=step_days,
+        currencies=currencies,
+        adults=ADULTS,
+    )
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-def log(msg: str) -> None:
-    stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{stamp}] {msg}"
-    print(line)
+def setup_logging() -> None:
+    """monitor.log, plus the console when there is one (pythonw has none)."""
+    if logger.handlers:
+        return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    fmt = logging.Formatter("[%(asctime)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+    handlers: list[logging.Handler] = [logging.FileHandler(LOG_FILE, encoding="utf-8")]
+    if sys.stdout is not None:
+        handlers.append(logging.StreamHandler(sys.stdout))
+    for h in handlers:
+        h.setFormatter(fmt)
+        logger.addHandler(h)
+    logger.setLevel(logging.INFO)
+
+
+def log(msg: str) -> None:
+    logger.info(msg)
 
 
 def load_dotenv() -> None:
-    envf = HERE / ".env"
-    if not envf.exists():
+    if not ENV_FILE.exists():
         return
-    for line in envf.read_text(encoding="utf-8").splitlines():
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -138,64 +289,22 @@ def load_dotenv() -> None:
         os.environ.setdefault(key.strip(), val.strip())
 
 
-def make_client() -> Client:
-    c = Client(impersonate="chrome_145", impersonate_os="macos",
-               referer=True, cookie_store=True)
-    c.set_cookies("https://www.google.com", {"SOCS": SOCS_COOKIE})
-    return c
-
-
-def build_query(depart: dt.date, ret: dt.date, currency: str):
-    airlines = [AIRLINE] if AIRLINE and AIRLINE.upper() != "ANY" else None
-    return create_query(
-        flights=[
-            FlightQuery(date=depart.isoformat(), from_airport=ORIGIN,
-                        to_airport=DESTINATION, max_stops=MAX_STOPS, airlines=airlines),
-            FlightQuery(date=ret.isoformat(), from_airport=DESTINATION,
-                        to_airport=ORIGIN, max_stops=MAX_STOPS, airlines=airlines),
-        ],
-        trip="round-trip", seat=SEAT, passengers=Passengers(adults=ADULTS),
-        currency=currency, max_stops=MAX_STOPS,
-    )
-
-
-def is_valid_offer(f) -> bool:
-    """Confirm the offer honors the stops/airline/endpoint filters (belt & suspenders)."""
-    if len(f.flights) > MAX_STOPS + 1:
-        return False
-    if AIRLINE and AIRLINE.upper() != "ANY" and f.type != AIRLINE:
-        return False
-    first, last = f.flights[0], f.flights[-1]
-    return (first.from_airport.code == ORIGIN
-            and last.to_airport.code == DESTINATION)
-
-
-def cheapest_offer(client: Client, depart: dt.date, ret: dt.date, currency: str):
-    q = build_query(depart, ret, currency)
-    html = client.get(URL, params=q.params()).text
-    if "consent.google.com" in html[:400]:
-        raise RuntimeError("Hit Google consent wall (refresh SOCS_COOKIE).")
-    # fast-flights' parser raises (TypeError/IndexError) when Google returns an
-    # empty result set -- i.e. no matching combo for this date pair. Treat as
-    # "no availability", not an error.
-    try:
-        offers = list(parse(html))
-    except (TypeError, IndexError, AttributeError):
-        return None
-    best = None
-    for f in offers:
-        if not is_valid_offer(f) or f.price is None:
+def set_env_value(key: str, value: str) -> None:
+    """Write KEY=value into .env (replacing an existing line) and the live environment."""
+    lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
+    out, done = [], False
+    for line in lines:
+        name = line.partition("=")[0].strip()
+        if name == key and not line.lstrip().startswith("#"):
+            if not done:
+                out.append(f"{key}={value}")
+                done = True
             continue
-        try:
-            price = float(f.price)
-        except (TypeError, ValueError):
-            continue
-        if best is None or price < best["price"]:
-            leg = f.flights[0]
-            t = leg.departure.time if leg.departure else None
-            dep = f"{t[0]:02d}:{t[1]:02d}" if t else "--:--"
-            best = {"price": price, "currency": currency, "out_dep_time": dep}
-    return best
+        out.append(line)
+    if not done:
+        out.append(f"{key}={value}")
+    ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
+    os.environ[key] = value
 
 
 # --------------------------------------------------------------------------- #
@@ -239,9 +348,29 @@ def classify(current_eur: float, low_eur: float, high_eur: float):
 # Persistence
 # --------------------------------------------------------------------------- #
 HIST_FIELDS = ["checked_at", "currency", "depart", "return", "price", "out_dep_time"]
-RUN_FIELDS = ["run_time", "light", "mode", "baseline_median",
-              "low_eur", "low_eur_depart", "low_eur_return",
-              "low_brl", "low_brl_depart", "low_brl_return"]
+RUN_FIELDS = [
+    "run_time",
+    "light",
+    "mode",
+    "baseline_median",
+    "low_eur",
+    "low_eur_depart",
+    "low_eur_return",
+    "low_brl",
+    "low_brl_depart",
+    "low_brl_return",
+]
+
+
+def offer_row(o: Offer, checked_at: str) -> dict:
+    return {
+        "checked_at": checked_at,
+        "currency": o.currency,
+        "depart": o.depart.isoformat(),
+        "return": o.ret.isoformat(),
+        "price": o.price,
+        "out_dep_time": o.out_dep_time,
+    }
 
 
 def append_rows(path: Path, fields: list[str], rows: list[dict]) -> None:
@@ -255,7 +384,7 @@ def append_rows(path: Path, fields: list[str], rows: list[dict]) -> None:
             w.writerow({k: r.get(k, "") for k in fields})
 
 
-def update_best(rows: list[dict]) -> dict:
+def update_best(rows: list[dict], save: bool = True) -> dict:
     best = {}
     if BEST_JSON.exists():
         best = json.loads(BEST_JSON.read_text(encoding="utf-8"))
@@ -266,14 +395,21 @@ def update_best(rows: list[dict]) -> dict:
         if prev is None or r["price"] < prev:
             best[cur] = r
             improved[cur] = r
-    BEST_JSON.write_text(json.dumps(best, indent=2), encoding="utf-8")
+    if save:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        BEST_JSON.write_text(json.dumps(best, indent=2), encoding="utf-8")
     return improved
 
 
 # --------------------------------------------------------------------------- #
 # Email
 # --------------------------------------------------------------------------- #
-LIGHT_EMOJI = {"LOW": "\U0001F7E2", "NORMAL": "\U0001F7E1", "HIGH": "\U0001F534"}
+LIGHT_EMOJI = {"LOW": "\U0001f7e2", "NORMAL": "\U0001f7e1", "HIGH": "\U0001f534"}
+CURRENCY_SIGN = {"EUR": "€", "BRL": "R$ ", "USD": "$", "GBP": "£"}
+
+
+def money(currency: str, amount: float) -> str:
+    return f"{CURRENCY_SIGN.get(currency, currency + ' ')}{amount:.0f}"
 
 
 def send_email(to_addr: str, subject: str, body: str) -> None:
@@ -294,145 +430,210 @@ def send_email(to_addr: str, subject: str, body: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Main
+# Run
 # --------------------------------------------------------------------------- #
-def daterange(start: dt.date, end: dt.date, step: int):
-    d = start
-    while d <= end:
-        yield d
-        d += dt.timedelta(days=step)
+@dataclass
+class RunResult:
+    search: Search
+    engine: str = ""
+    offers: list[Offer] = field(default_factory=list)
+    errors: int = 0
+    best: dict[str, Offer] = field(default_factory=dict)  # cheapest per currency
+    light: str = ""  # LOW / NORMAL / HIGH; "" without an EUR price
+    mode: str = ""
+    median: float | None = None
+    new_low: bool = False  # beat the all-time EUR low
+    failure: str = ""  # why the sweep was cut short (EngineError)
+    cancelled: bool = False
 
 
-def main(argv=None) -> int:
-    global ORIGIN, DESTINATION, AIRLINE, MAX_STOPS
-    load_dotenv()
-    args = parse_args(argv)
-    # Route the report to the real recipient without hardcoding it in the repo:
-    # REPORT_EMAIL wins, else the Gmail account owner, else the placeholder.
-    if args.email == "you@example.com":
-        args.email = (os.environ.get("REPORT_EMAIL")
-                      or os.environ.get("GMAIL_USER")
-                      or args.email)
+def engine_label(key: str) -> str:
+    """Label of an engine key, or of "+"-joined keys ("auto" falling back per currency)."""
+    return " + ".join(ENGINES[k].label if k in ENGINES else k for k in key.split("+"))
 
-    # Apply route parameters (origin / destination / airline / stopovers).
-    ORIGIN = args.origin.upper()
-    DESTINATION = args.destination.upper()
-    AIRLINE = args.airline
-    MAX_STOPS = args.max_stops
-    airline_label = AIRLINE if (AIRLINE and AIRLINE.upper() != "ANY") else "any airline"
-    stops_label = "direct" if MAX_STOPS == 0 else f"<={MAX_STOPS} stop(s)"
-    route = f"{ORIGIN}<->{DESTINATION} {airline_label} {stops_label}"
 
-    start = dt.date.fromisoformat(args.start)
-    end = dt.date.fromisoformat(args.end)
-    stay = args.stay_days
-
-    client = make_client()
-    log(f"Run start. {route}, {stay}n stay, "
-        f"outbound {start}..{end} step {args.step_days}d, currencies {CURRENCIES}.")
-
-    all_rows: list[dict] = []
-    run_best: dict = {}
-    errors = 0
-
-    for depart in daterange(start, end, args.step_days):
-        ret = depart + dt.timedelta(days=stay)
-        for currency in CURRENCIES:
-            try:
-                offer = cheapest_offer(client, depart, ret, currency)
-            except Exception as e:
-                errors += 1
-                log(f"  {depart} {currency}: error {e}")
-                if "consent wall" in str(e):
-                    log("Aborting: consent cookie invalid.")
-                    return 2
-                time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
-                continue
-            time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
-            if not offer:
-                continue
-            row = {
-                "checked_at": dt.datetime.now().isoformat(timespec="seconds"),
-                "currency": currency, "depart": depart.isoformat(),
-                "return": ret.isoformat(), "price": offer["price"],
-                "out_dep_time": offer["out_dep_time"],
-            }
-            all_rows.append(row)
-            if currency not in run_best or row["price"] < run_best[currency]["price"]:
-                run_best[currency] = row
-
-    if not all_rows or "EUR" not in run_best:
-        log(f"No {route} offers found this run. ({errors} errors)")
-        # Still notify so silence never hides a scraper break.
-        if not args.no_email:
-            send_email(args.email, f"[WARN] {ORIGIN}-{DESTINATION} monitor: no offers found",
-                       f"Run at {dt.datetime.now():%Y-%m-%d %H:%M} found no {route} "
-                       f"offers ({errors} errors). Possible scraper/consent "
-                       f"issue — check monitor.log.")
-        return 0
-
-    append_rows(HISTORY_CSV, HIST_FIELDS, all_rows)
-    improved = update_best(all_rows)
-
-    eur = run_best["EUR"]
-    brl = run_best.get("BRL")
-    light, mode, med = classify(eur["price"], args.low_eur, args.high_eur)
-
-    # Record this run's summary (used for future median baseline).
-    run_row = {
-        "run_time": dt.datetime.now().isoformat(timespec="seconds"),
-        "light": light, "mode": mode,
-        "baseline_median": f"{med:.0f}" if med is not None else "",
-        "low_eur": eur["price"], "low_eur_depart": eur["depart"],
-        "low_eur_return": eur["return"],
-        "low_brl": brl["price"] if brl else "", "low_brl_depart": brl["depart"] if brl else "",
-        "low_brl_return": brl["return"] if brl else "",
-    }
-    append_rows(RUNS_CSV, RUN_FIELDS, [run_row])
-
-    # ---- Report ----
-    emoji = LIGHT_EMOJI.get(light, "")
-    subject = (f"[{light}] {ORIGIN}-{DESTINATION} EUR {eur['price']:.0f} "
-               f"(out {eur['depart']})")
-
-    baseline_line = (f"Baseline: rolling median of past runs = €{med:.0f} "
-                     f"(±{int(BAND*100)}% band)"
-                     if mode == "auto-median"
-                     else f"Baseline: fixed thresholds LOW≤€{args.low_eur:.0f} / "
-                          f"HIGH≥€{args.high_eur:.0f}")
-    newlow = " *NEW ALL-TIME LOW*" if "EUR" in improved else ""
-
-    body = "\n".join([
-        f"{route}, {ORIGIN} <-> {DESTINATION}, {stay}-night stay.",
-        f"Outbound window scanned: {start} .. {end} (step {args.step_days}d).",
+def format_report(r: RunResult, low_eur: float, high_eur: float) -> tuple[str, str]:
+    """(subject, body) of the report email."""
+    s = r.search
+    head = r.best.get("EUR") or next(iter(r.best.values()))
+    tag = r.light or "INFO"
+    subject = (
+        f"[{tag}] {s.origin}-{s.destination} {head.currency} {head.price:.0f} (out {head.depart})"
+    )
+    lines = [
+        f"{s.label}, {s.origin} <-> {s.destination}, {s.stay_days}-night stay.",
+        f"Outbound window scanned: {s.start} .. {s.end} (step {s.step_days}d).",
+        f"Engine: {engine_label(r.engine)}.",
         "",
-        f"TRAFFIC LIGHT: {emoji} {light}   [{mode}]",
-        baseline_line,
-        "",
-        f"Cheapest EUR: €{eur['price']:.0f}{newlow}",
-        f"   outbound {eur['depart']} (dep {eur['out_dep_time']})  /  "
-        f"return {eur['return']}",
-    ])
-    if brl:
-        body += "\n".join([
+    ]
+    if r.failure:
+        lines += [f"WARNING: sweep cut short, results may be incomplete: {r.failure}", ""]
+    if r.light:
+        lines.append(f"TRAFFIC LIGHT: {LIGHT_EMOJI.get(r.light, '')} {r.light}   [{r.mode}]")
+        lines.append(
+            f"Baseline: rolling median of past runs = €{r.median:.0f} (±{int(BAND * 100)}% band)"
+            if r.mode == "auto-median"
+            else f"Baseline: fixed thresholds LOW≤€{low_eur:.0f} / HIGH≥€{high_eur:.0f}"
+        )
+        lines.append("")
+    for cur in s.currencies:
+        o = r.best.get(cur)
+        if not o:
+            continue
+        newlow = " *NEW ALL-TIME LOW*" if cur == "EUR" and r.new_low else ""
+        stops = "" if o.stops is None else (", direct" if o.stops == 0 else f", {o.stops} stop(s)")
+        airline = f", {o.airline}" if o.airline else ""
+        lines += [
+            f"Cheapest {cur}: {money(cur, o.price)}{newlow}",
+            f"   outbound {o.depart} (dep {o.out_dep_time}{airline}{stops})  /  return {o.ret}",
             "",
-            f"Cheapest BRL: R$ {brl['price']:.0f}",
-            f"   outbound {brl['depart']} (dep {brl['out_dep_time']})  /  "
-            f"return {brl['return']}",
-        ])
-    body += (f"\n\nOffers scanned this run: {len(all_rows)}  |  errors: {errors}"
-             f"\nData: {HISTORY_CSV}")
+        ]
+    lines += [
+        f"Offers scanned this run: {len(r.offers)}  |  errors: {r.errors}",
+        f"Data: {HISTORY_CSV}",
+    ]
+    return subject, "\n".join(lines)
 
-    log(f"Cheapest: EUR {eur['price']:.0f} ({eur['depart']}) light={light} [{mode}]"
-        + (f" BRL {brl['price']:.0f}" if brl else ""))
-    if not args.no_email:
+
+def run_monitor(
+    search: Search,
+    engine: str = AUTO,
+    *,
+    recipient: str = "",
+    send: bool = True,
+    record: bool = True,
+    low_eur: float = DEFAULTS["low_eur"],
+    high_eur: float = DEFAULTS["high_eur"],
+    api_keys: dict[str, str] | None = None,
+    stop: threading.Event | None = None,
+    on_engine: Callable[[str], None] | None = None,
+    on_offer: Callable[[Offer], None] | None = None,
+) -> RunResult:
+    """One monitor run: sweep, then record, classify and report. Shared by CLI and GUI."""
+    r = RunResult(search, engine=engine)
+    route = search.label
+    log(
+        f"Run start. {route}, {search.stay_days}n stay, outbound {search.start}..{search.end} "
+        f"step {search.step_days}d, currencies {list(search.currencies)}, engine {engine}."
+    )
+    sw = sweep(search, engine, api_keys=api_keys, stop=stop, on_engine=on_engine, on_offer=on_offer)
+    r.offers, r.errors, r.engine, r.failure = sw.offers, sw.errors, sw.engine, sw.failure
+    if stop is not None and stop.is_set():
+        r.cancelled = True
+        log("Run cancelled; nothing recorded or sent.")
+        return r
+
+    for o in r.offers:
+        if o.currency not in r.best or o.price < r.best[o.currency].price:
+            r.best[o.currency] = o
+
+    if not r.best:
+        log(f"No {route} offers found this run. ({r.errors} errors)")
+        # Still notify so silence never hides a scraper break.
+        if send:
+            send_email(
+                recipient,
+                f"[WARN] {search.origin}-{search.destination} monitor: no offers found",
+                f"Run at {dt.datetime.now():%Y-%m-%d %H:%M} found no {route} offers "
+                f"via {engine_label(r.engine)} ({r.errors} errors). "
+                + (f"{r.failure} " if r.failure else "")
+                + "Possible scraper/consent issue — check monitor.log.",
+            )
+        return r
+
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    rows = [offer_row(o, now) for o in r.offers]
+    r.new_low = "EUR" in update_best(rows, save=record)
+
+    eur, brl = r.best.get("EUR"), r.best.get("BRL")
+    if eur:
+        r.light, r.mode, r.median = classify(eur.price, low_eur, high_eur)
+
+    if record:
+        append_rows(HISTORY_CSV, HIST_FIELDS, rows)
+        # Record this run's summary (used for future median baseline).
+        if eur:
+            append_rows(
+                RUNS_CSV,
+                RUN_FIELDS,
+                [
+                    {
+                        "run_time": now,
+                        "light": r.light,
+                        "mode": r.mode,
+                        "baseline_median": f"{r.median:.0f}" if r.median is not None else "",
+                        "low_eur": eur.price,
+                        "low_eur_depart": eur.depart.isoformat(),
+                        "low_eur_return": eur.ret.isoformat(),
+                        "low_brl": brl.price if brl else "",
+                        "low_brl_depart": brl.depart.isoformat() if brl else "",
+                        "low_brl_return": brl.ret.isoformat() if brl else "",
+                    }
+                ],
+            )
+
+    summary = "  ".join(f"{o.currency} {o.price:.0f} ({o.depart})" for o in r.best.values())
+    log(f"Cheapest: {summary}" + (f" light={r.light} [{r.mode}]" if r.light else ""))
+    if send:
+        subject, body = format_report(r, low_eur, high_eur)
         try:
-            send_email(args.email, subject, body)
+            send_email(recipient, subject, body)
         except Exception as e:
             log(f"Email FAILED: {e}")
 
-    log(f"Run done. {len(all_rows)} offers, {errors} errors.")
-    return 0
+    log(f"Run done. {len(r.offers)} offers, {r.errors} errors.")
+    return r
+
+
+def list_engines() -> str:
+    rows = [
+        f"  {AUTO:<16} free engines in order ({', '.join(AUTO_ORDER)}), falling back per currency"
+    ]
+    for key, e in ENGINES.items():
+        need = f"  [needs {e.key_env}]" if e.key_env else ""
+        rows.append(f"  {key:<16} {e.label} -- {e.cost}{need}")
+    return "Price engines (free first):\n" + "\n".join(rows)
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+def main(argv=None) -> int:
+    load_dotenv()
+    setup_logging()
+    args = parse_args(argv)
+    if args.list_engines:
+        print(list_engines())
+        return 0
+    # Route the report to the real recipient without hardcoding it in the repo:
+    # REPORT_EMAIL wins, else the Gmail account owner, else the placeholder.
+    if args.email == "you@example.com":
+        args.email = os.environ.get("REPORT_EMAIL") or os.environ.get("GMAIL_USER") or args.email
+    try:
+        search = build_search(
+            args.origin,
+            args.destination,
+            args.airline,
+            args.max_stops,
+            dt.date.fromisoformat(args.start),
+            dt.date.fromisoformat(args.end),
+            args.stay_days,
+            args.step_days,
+            args.currencies,
+        )
+    except ValueError as e:
+        log(f"Invalid parameters: {e}")
+        return 1
+    r = run_monitor(
+        search,
+        args.engine,
+        recipient=args.email,
+        send=not args.no_email,
+        record=True,
+        low_eur=args.low_eur,
+        high_eur=args.high_eur,
+    )
+    return 2 if r.failure else 0
 
 
 if __name__ == "__main__":
