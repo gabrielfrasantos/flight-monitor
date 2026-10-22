@@ -24,11 +24,13 @@ import datetime as dt
 import logging
 import os
 import random
+import re
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from primp import Client
@@ -39,6 +41,15 @@ logger = logging.getLogger("flight_monitor")
 # google-scrape engine. Refresh if runs abort "consent wall": accept cookies on
 # google.com in a browser, copy the SOCS cookie value here.
 SOCS_COOKIE = "CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg"
+CONSENT_HOST = "consent.google.com"
+_ABSOLUTE_URL = re.compile(r"(?:https?:)?//[^\s\"'<>]+")
+
+
+def _on_consent_wall(url: str, html: str) -> bool:
+    """Google answered with its EU consent page instead of results: we were
+    redirected there, or the page head points there."""
+    urls = [url, *_ABSOLUTE_URL.findall(html[:400])]
+    return any(urlparse(u).hostname == CONSENT_HOST for u in urls)
 
 
 class EngineError(RuntimeError):
@@ -408,8 +419,9 @@ class GoogleScrapeEngine(Engine):
             currency=currency,
             max_stops=search.max_stops,
         )
-        html = self._client().get(URL, params=q.params()).text
-        if "consent.google.com" in html[:400]:
+        resp = self._client().get(URL, params=q.params())
+        html = resp.text
+        if _on_consent_wall(str(resp.url), html):
             raise EngineError("Hit Google consent wall (refresh SOCS_COOKIE in engines.py).")
         # fast-flights' parser raises (TypeError/IndexError) when Google returns an
         # empty result set -- i.e. no matching combo for this date pair. Treat as

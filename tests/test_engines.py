@@ -292,3 +292,29 @@ def test_auto_skips_engines_without_key(fakes, monkeypatch):
     monkeypatch.delenv("SOME_UNSET_TOKEN", raising=False)
     r = sweep(make_search(), AUTO)
     assert r.offers == [] and r.engine == AUTO
+
+
+@pytest.mark.parametrize(
+    "url, html, wall",
+    [
+        ("https://consent.google.com/ml?continue=https://www.google.com/travel/flights", "", True),
+        (
+            "https://www.google.com/travel/flights",
+            '<html><base href="https://consent.google.com/">',
+            True,
+        ),
+        (
+            "https://www.google.com/travel/flights",
+            '<html><base href="https://www.google.com/">',
+            False,
+        ),
+        (
+            "https://www.google.com/travel/flights",
+            "<p>see consent.google.com.evil.example</p>",
+            False,
+        ),
+        ("https://consent.google.com.evil.example/", "", False),
+    ],
+)
+def test_consent_wall_detection(url, html, wall):
+    assert engines._on_consent_wall(url, html) is wall
