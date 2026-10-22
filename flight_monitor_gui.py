@@ -95,7 +95,6 @@ from desktop import (
 )
 from engines import AUTO, AUTO_ORDER, ENGINES, Offer, Search
 
-# (code, name); the combo also takes typed codes, e.g. "KL,AF".
 AIRLINES = [
     ("", "Any airline"),
     ("KL", "KLM"),
@@ -172,9 +171,6 @@ def _summary(r: fm.RunResult) -> str:
     return text
 
 
-# --------------------------------------------------------------------------- #
-# Worker thread <-> Qt
-# --------------------------------------------------------------------------- #
 class _QueueHandler(logging.Handler):
     def __init__(self, events: queue.SimpleQueue) -> None:
         super().__init__()
@@ -187,10 +183,10 @@ class _QueueHandler(logging.Handler):
 class SearchController(QObject):
     """Runs one monitor run at a time in a daemon thread; re-emits its events on Qt's thread."""
 
-    log_record = Signal(object)  # logging.LogRecord
-    engine_started = Signal(str)  # engine key ("auto" may try several)
-    offer_found = Signal(object)  # engines.Offer
-    finished = Signal(object)  # flight_monitor.RunResult
+    log_record = Signal(object)
+    engine_started = Signal(str)
+    offer_found = Signal(object)
+    finished = Signal(object)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -241,7 +237,7 @@ class SearchController(QObject):
                 on_offer=lambda offer: put(("offer", offer)),
                 **options,
             )
-        except Exception as e:  # a bug, not a price problem: report it, don't die
+        except Exception as e:
             fm.log(f"Run crashed: {e!r}")
             result = fm.RunResult(search, engine=engine, failure=f"Run crashed: {e}")
         put(("done", result))
@@ -261,9 +257,6 @@ class SearchController(QObject):
             signals[kind].emit(payload)
 
 
-# --------------------------------------------------------------------------- #
-# Email settings
-# --------------------------------------------------------------------------- #
 class EmailDialog(QDialog):
     """Report recipient, sending account and when to email.
 
@@ -310,7 +303,10 @@ class EmailDialog(QDialog):
         server.addWidget(self._port_spin)
         form.addRow("SMTP server:", server)
         form.addRow("When to email:", self._when_combo)
-        stored = QLabel(f"Stored on this PC in {fm.ENV_FILE}")
+        stored = QLabel(
+            "The password is kept in the system credential store (Windows Credential "
+            f"Manager); the other settings in {fm.ENV_FILE}."
+        )
         stored.setStyleSheet("color: #888888; font-size: 10px;")
         stored.setWordWrap(True)
 
@@ -368,15 +364,18 @@ class EmailDialog(QDialog):
         if cfg.recipient and "@" not in cfg.recipient:
             QMessageBox.warning(self, "Email settings", f"{cfg.recipient!r} is not an address.")
             return
-        fm.save_email_config(cfg)
+        try:
+            fm.save_email_config(cfg)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Email settings", f"Could not store the password securely:\n{e}"
+            )
+            return
         fm.save_settings({"email_when": self.email_when()})
         fm.log(f"Email settings saved (to {cfg.recipient or '-'}, email {self.email_when()}).")
         super().accept()
 
 
-# --------------------------------------------------------------------------- #
-# Main window
-# --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -387,7 +386,7 @@ class MainWindow(QMainWindow):
         self._tray: SystemTrayIcon | None = None
         self._checker: UpdateChecker | None = None
         self._told_about_tray = False
-        self._saved_run = False  # the running search is an automatic / "Run now" one
+        self._saved_run = False
         self._manual_update_check = False
 
         self._controller = SearchController(self)
@@ -426,7 +425,7 @@ class MainWindow(QMainWindow):
         self._schedule_timer.setInterval(SCHEDULE_TICK_MS)
         self._schedule_timer.timeout.connect(self._tick_schedule)
         self._schedule_timer.start()
-        QTimer.singleShot(5000, self._tick_schedule)  # catch up soon after login / wake
+        QTimer.singleShot(5000, self._tick_schedule)
 
     def set_tray(self, tray: SystemTrayIcon) -> None:
         self._tray = tray
@@ -443,7 +442,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._tray is not None:
-            # Closing hides to the tray: the schedule keeps running. Quit is in its menu.
             event.ignore()
             self.hide()
             self._tray.sync_menu()
@@ -465,10 +463,6 @@ class MainWindow(QMainWindow):
             self.showNormal()
             self.raise_()
             self.activateWindow()
-
-    # ------------------------------------------------------------------
-    # Builder helpers
-    # ------------------------------------------------------------------
 
     def _build_route_group(self) -> QGroupBox:
         box = QGroupBox("Route")
@@ -704,10 +698,6 @@ class MainWindow(QMainWindow):
         spin.setPrefix(prefix)
         return spin
 
-    # ------------------------------------------------------------------
-    # Settings <-> widgets
-    # ------------------------------------------------------------------
-
     def _load(self, s: dict) -> None:
         self._origin_edit.setText(str(s["origin"]).upper())
         self._dest_edit.setText(str(s["destination"]).upper())
@@ -780,10 +770,6 @@ class MainWindow(QMainWindow):
     def _engine_key(self) -> str:
         return self._engine_combo.currentData()
 
-    # ------------------------------------------------------------------
-    # Automatic runs
-    # ------------------------------------------------------------------
-
     @Slot()
     def _save_schedule(self) -> None:
         text = self._times_edit.text()
@@ -816,7 +802,7 @@ class MainWindow(QMainWindow):
         self._refresh_schedule_info()
         s = fm.load_settings()
         if not s["auto_run"] or self._controller.is_running:
-            return  # a search in progress: the slot stays due until it finishes
+            return
         last = fm.load_state().get("last_auto_run")
         try:
             last_run = dt.datetime.fromisoformat(last) if last else None
@@ -869,10 +855,6 @@ class MainWindow(QMainWindow):
         fm.log(message)
         if self._tray is not None:
             self._tray.notify("Flight Monitor", message, warning)
-
-    # ------------------------------------------------------------------
-    # Slots
-    # ------------------------------------------------------------------
 
     @Slot()
     def _on_engine_changed(self) -> None:
@@ -1000,7 +982,7 @@ class MainWindow(QMainWindow):
         self._table.insertRow(row)
         for col, value in enumerate(cells):
             item = QTableWidgetItem()
-            item.setData(Qt.ItemDataRole.DisplayRole, value)  # ints sort numerically
+            item.setData(Qt.ItemDataRole.DisplayRole, value)
             item.setData(Qt.ItemDataRole.UserRole, offer)
             self._table.setItem(row, col, item)
         self._table.setSortingEnabled(True)
@@ -1016,7 +998,6 @@ class MainWindow(QMainWindow):
             self._set_status(IDLE, text)
             return
         if r.best:
-            # Rows streamed in as they were found; show the run's final set, cheapest marked.
             self._clear_results()
             for offer in r.offers:
                 self._add_offer(offer)
@@ -1060,10 +1041,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Flight Monitor {fm.__version__} is up to date.", 5000)
         self._manual_update_check = False
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     def _set_status(self, color: str, text: str) -> None:
         self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
         self._status.setText(text)
@@ -1090,9 +1067,6 @@ class MainWindow(QMainWindow):
                 cell.setBackground(QColor(68, 221, 68, 60))
 
 
-# --------------------------------------------------------------------------- #
-# Entry point
-# --------------------------------------------------------------------------- #
 def _log_uncaught_exceptions() -> None:
     """The installed app has no console: send crashes to monitor.log."""
     original = sys.excepthook
@@ -1108,7 +1082,6 @@ def _log_uncaught_exceptions() -> None:
 def _quit_on_signals(app: QApplication) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: app.quit())
-    # Python signal handlers only run between bytecodes; a no-op timer gives them a turn.
     wake = QTimer(app)
     wake.timeout.connect(lambda: None)
     wake.start(250)
@@ -1118,12 +1091,16 @@ def smoke_test() -> int:
     """Build check for the packaged app: engine libraries load, the window builds."""
     try:
         import fast_flights.parser  # noqa: F401
+        import keyring
         import primp  # noqa: F401
         from babel.numbers import format_currency
         from fli.search import SearchDates  # noqa: F401
         from fli.search.client import get_client
 
         get_client()
+        backend = keyring.get_keyring()
+        if sys.platform == "win32" and "Windows" not in type(backend).__module__:
+            raise RuntimeError(f"no usable credential store: {backend!r}")
         format_currency(1, "EUR", locale="en_US")
         if render_icon(64).isNull():
             raise RuntimeError("icon did not render")
@@ -1160,7 +1137,7 @@ def main(argv: list[str] | None = None) -> int:
         instance.send(b"quit")
         return 0
     if instance.already_running():
-        return 0  # the running copy shows its window
+        return 0
 
     window = MainWindow()
     if QSystemTrayIcon.isSystemTrayAvailable():
@@ -1179,7 +1156,7 @@ def main(argv: list[str] | None = None) -> int:
 
     checker = UpdateChecker(app)
     window.set_checker(checker)
-    if fm.FROZEN:  # a checkout updates with git pull
+    if fm.FROZEN:
         QTimer.singleShot(3000, checker.check_in_background)
 
     app.aboutToQuit.connect(window.shutdown)

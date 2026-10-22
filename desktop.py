@@ -36,9 +36,6 @@ RELEASES_API = "https://api.github.com/repos/gabrielfrasantos/flight-monitor/rel
 INSTANCE_KEY = "flight-monitor-gui"
 
 
-# --------------------------------------------------------------------------- #
-# Icon
-# --------------------------------------------------------------------------- #
 def render_icon(size: int) -> QPixmap:
     """Blue rounded square with a white airplane (top view, flying up-right)."""
     px = QPixmap(size, size)
@@ -51,7 +48,6 @@ def render_icon(size: int) -> QPixmap:
     p.setBrush(QColor("#0277BD"))
     p.drawRoundedRect(margin, margin, size - 2 * margin, size - 2 * margin, radius, radius)
 
-    # Plane drawn on a 100x100 grid, nose up, then turned 45 degrees.
     p.translate(size / 2, size / 2)
     p.rotate(45)
     p.scale(size / 125, size / 125)
@@ -59,8 +55,8 @@ def render_icon(size: int) -> QPixmap:
     plane = QPainterPath()
     plane.addRoundedRect(44, 8, 12, 84, 6, 6)
     for points in (
-        [(50, 36), (92, 58), (92, 66), (50, 54), (8, 66), (8, 58)],  # wings
-        [(50, 76), (68, 86), (68, 92), (50, 88), (32, 92), (32, 86)],  # tail
+        [(50, 36), (92, 58), (92, 66), (50, 54), (8, 66), (8, 58)],
+        [(50, 76), (68, 86), (68, 92), (50, 88), (32, 92), (32, 86)],
     ):
         plane.addPolygon(QPolygonF([QPointF(x, y) for x, y in points]))
     p.setBrush(QColor("white"))
@@ -76,9 +72,6 @@ def app_icon() -> QIcon:
     return icon
 
 
-# --------------------------------------------------------------------------- #
-# Single instance
-# --------------------------------------------------------------------------- #
 class SingleInstance(QObject):
     """One app per user: a second launch asks the first to show its window and exits.
 
@@ -86,8 +79,8 @@ class SingleInstance(QObject):
     channel lets the installer ask the running copy to quit before replacing files.
     """
 
-    activated = Signal()  # another launch asked us to show the window
-    quit_requested = Signal()  # `--quit` (the installer) asked us to exit
+    activated = Signal()
+    quit_requested = Signal()
 
     def __init__(self, key: str = INSTANCE_KEY, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -95,14 +88,19 @@ class SingleInstance(QObject):
         self._server: QLocalServer | None = None
 
     def send(self, message: bytes) -> bool:
-        """Deliver message to the running instance; False if there is none."""
+        """Deliver message to the running instance; False if there is none.
+
+        Waits for the instance's acknowledgement before hanging up: on Windows a
+        named pipe closed right after writing can lose the data unread.
+        """
         socket = QLocalSocket()
         socket.connectToServer(self._key)
-        if not socket.waitForConnected(500):
+        if not socket.waitForConnected(1000):
             return False
         socket.write(message)
         socket.flush()
-        socket.waitForBytesWritten(500)
+        socket.waitForBytesWritten(1000)
+        socket.waitForReadyRead(2000)
         socket.disconnectFromServer()
         return True
 
@@ -110,7 +108,6 @@ class SingleInstance(QObject):
         """True (after asking it to show itself) if another instance is up; else become it."""
         if self.send(b"show"):
             return True
-        # A crashed instance can leave a stale socket file behind (Unix).
         QLocalServer.removeServer(self._key)
         self._server = QLocalServer(self)
         self._server.newConnection.connect(self._on_connection)
@@ -121,22 +118,20 @@ class SingleInstance(QObject):
     def _on_connection(self) -> None:
         assert self._server is not None
         while (conn := self._server.nextPendingConnection()) is not None:
-            conn.readyRead.connect(lambda c=conn: self._on_message(c))
-            conn.disconnected.connect(conn.deleteLater)
-            if conn.bytesAvailable():
-                self._on_message(conn)
+            if not conn.bytesAvailable():
+                conn.waitForReadyRead(1000)
+            message = bytes(conn.readAll().data()).strip()
+            conn.write(b"ok")
+            conn.flush()
+            conn.waitForBytesWritten(1000)
+            conn.disconnectFromServer()
+            conn.deleteLater()
+            if message == b"quit":
+                self.quit_requested.emit()
+            elif message:
+                self.activated.emit()
 
-    def _on_message(self, conn: QLocalSocket) -> None:
-        message = bytes(conn.readAll().data()).strip()
-        if message == b"quit":
-            self.quit_requested.emit()
-        elif message:
-            self.activated.emit()
 
-
-# --------------------------------------------------------------------------- #
-# Tray
-# --------------------------------------------------------------------------- #
 class SystemTrayIcon(QSystemTrayIcon):
     """Keeps the app reachable (and its schedule running) from the notification area.
 
@@ -201,9 +196,6 @@ class SystemTrayIcon(QSystemTrayIcon):
         self.showMessage(title, message, icon, 8000)
 
 
-# --------------------------------------------------------------------------- #
-# Updates
-# --------------------------------------------------------------------------- #
 def parse_version(v: str) -> tuple[int, ...]:
     """'v1.2.3' or '1.2.3' -> (1, 2, 3); (0,) when unparseable."""
     try:

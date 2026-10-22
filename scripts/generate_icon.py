@@ -27,7 +27,7 @@ def _build_ico(pngs: dict[int, bytes]) -> bytes:
     offset = 6 + 16 * len(pngs)
     entries, data = b"", b""
     for size, png in sorted(pngs.items()):
-        dim = 0 if size >= 256 else size  # 0 means 256 in ICO
+        dim = 0 if size >= 256 else size
         entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(png), offset + len(data))
         data += png
     return header + entries + data

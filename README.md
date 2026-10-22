@@ -96,7 +96,8 @@ highlighted), with the traffic light and a live log. **Stop** cancels.
 - **Email settings…:** where reports go, the sending account, the SMTP server,
   and when to email: **every run**, **only LOW prices, new all-time lows and
   problems**, or **never**. **Send test email** checks the account before you
-  save. The account is stored in `.env`.
+  save. The password goes to Windows Credential Manager (never to a file); the
+  other settings go to `.env`.
 - The app keeps a tray icon (click: show/hide; menu: run now, check for
   updates, open data folder, quit). Only one copy runs at a time; launching it
   again shows the open window.
@@ -121,7 +122,8 @@ Re-run this after updating: the default engine and the GUI need the new
 `flights` and `PySide6` packages.
 
 ### 2. Email account (for the report)
-Easiest: GUI → **Email settings…**. Or edit `.env` by hand (see `.env.example`).
+Easiest: GUI → **Email settings…**, which keeps the password in Windows Credential
+Manager. Or edit `.env` by hand (see `.env.example`), which keeps it in plain text.
 
 For Gmail you need an App Password, not your normal password:
 1. The Google account needs **2-Step Verification ON**:

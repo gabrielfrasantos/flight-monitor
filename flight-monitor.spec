@@ -1,11 +1,3 @@
-# PyInstaller spec for the Flight Monitor desktop app.
-#
-#   python scripts/generate_icon.py          # assets/icon.ico + icon.png
-#   pyinstaller --noconfirm flight-monitor.spec
-#
-# Output: dist/flight-monitor/ -- one folder, which Inno Setup packs into the
-# Windows installer. A folder rather than one-file: the app runs all day in the
-# tray, so it shouldn't unpack itself to %TEMP% on every start.
 
 import sys
 
@@ -16,8 +8,6 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    # The engines import their libraries inside functions (one missing library
-    # disables one engine); name them so they are always bundled.
     hiddenimports=[
         "fli.models",
         "fli.search",
@@ -26,6 +16,7 @@ a = Analysis(
         "fast_flights.fetcher",
         "fast_flights.parser",
         "primp",
+        "keyring.backends.Windows",
     ],
     hookspath=[],
     hooksconfig={},
@@ -45,8 +36,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,  # UPX-packed Qt DLLs break and trip antivirus
-    console=False,  # no console window on Windows
+    upx=False,
+    console=False,
     icon="assets/icon.ico" if _WINDOWS else "assets/icon.png",
 )
 

@@ -10,9 +10,6 @@ T = dt.time
 D = dt.datetime
 
 
-# --------------------------------------------------------------------------- #
-# Run times and the due-run rule
-# --------------------------------------------------------------------------- #
 def test_parse_run_times():
     assert fm.parse_run_times("20:00, 8:00;08:00") == [T(8, 0), T(20, 0)]
     for bad in ("", "25:00", "8h"):
@@ -26,12 +23,12 @@ TIMES = [T(8, 0), T(20, 0)]
 @pytest.mark.parametrize(
     "now, last, due",
     [
-        (D(2026, 12, 1, 8, 0, 30), None, D(2026, 12, 1, 8, 0)),  # on time
-        (D(2026, 12, 1, 8, 5), D(2026, 12, 1, 8, 0, 30), None),  # already ran
-        (D(2026, 12, 1, 10, 0), D(2026, 11, 30, 20, 0), D(2026, 12, 1, 8, 0)),  # woke late
-        (D(2026, 12, 1, 15, 0), D(2026, 11, 30, 20, 0), None),  # missed by more than grace
-        (D(2026, 12, 1, 1, 0), D(2026, 11, 30, 8, 0), D(2026, 11, 30, 20, 0)),  # past midnight
-        (D(2026, 12, 1, 7, 59), None, None),  # nothing yet
+        (D(2026, 12, 1, 8, 0, 30), None, D(2026, 12, 1, 8, 0)),
+        (D(2026, 12, 1, 8, 5), D(2026, 12, 1, 8, 0, 30), None),
+        (D(2026, 12, 1, 10, 0), D(2026, 11, 30, 20, 0), D(2026, 12, 1, 8, 0)),
+        (D(2026, 12, 1, 15, 0), D(2026, 11, 30, 20, 0), None),
+        (D(2026, 12, 1, 1, 0), D(2026, 11, 30, 8, 0), D(2026, 11, 30, 20, 0)),
+        (D(2026, 12, 1, 7, 59), None, None),
     ],
 )
 def test_due_run(now, last, due):
@@ -43,9 +40,6 @@ def test_next_run():
     assert fm.next_run(D(2026, 12, 1, 21, 0), TIMES) == D(2026, 12, 2, 8, 0)
 
 
-# --------------------------------------------------------------------------- #
-# Settings and state
-# --------------------------------------------------------------------------- #
 def test_save_settings_updates_only_given_keys(data_dir):
     fm.save_settings({"destination": "GIG"})
     fm.save_settings({"auto_run": True, "run_times": "07:30"})
@@ -68,16 +62,13 @@ def test_app_home(monkeypatch, tmp_path):
     monkeypatch.setenv("FLIGHT_MONITOR_HOME", str(tmp_path))
     assert fm.app_home() == tmp_path
     monkeypatch.delenv("FLIGHT_MONITOR_HOME")
-    assert fm.app_home() == fm.Path(fm.__file__).resolve().parent  # checkout
+    assert fm.app_home() == fm.Path(fm.__file__).resolve().parent
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
-    assert fm.app_home() == tmp_path / "Roaming" / "flight-monitor"  # installed app
+    assert fm.app_home() == tmp_path / "Roaming" / "flight-monitor"
 
 
-# --------------------------------------------------------------------------- #
-# Email account
-# --------------------------------------------------------------------------- #
 def test_email_config_from_env_with_old_gmail_names(data_dir, monkeypatch):
     monkeypatch.setenv("GMAIL_USER", "old@gmail.com")
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "abcd efgh")
@@ -97,11 +88,35 @@ def test_email_config_from_env_with_old_gmail_names(data_dir, monkeypatch):
     )
 
 
-def test_save_email_config_round_trips_through_env_file(data_dir):
-    fm.save_email_config(fm.EmailConfig("a@x.y", "pw", "b@x.y", "smtp.x.y", 587))
+def test_save_email_config_keeps_the_password_out_of_files(data_dir):
+    fm.ENV_FILE.write_text("GMAIL_APP_PASSWORD=old\nSMTP_PASSWORD=older\n", encoding="utf-8")
+    fm.load_dotenv()
+    fm.save_email_config(fm.EmailConfig("a@x.y", "s3cret", "b@x.y", "smtp.x.y", 587))
     text = fm.ENV_FILE.read_text(encoding="utf-8")
     assert "SMTP_USER=a@x.y" in text and "SMTP_PORT=587" in text
-    assert fm.email_config() == fm.EmailConfig("a@x.y", "pw", "b@x.y", "smtp.x.y", 587)
+    assert "s3cret" not in text and "PASSWORD" not in text
+    assert fm._keyring().get_password(fm.KEYRING_SERVICE, "a@x.y") == "s3cret"
+    assert fm.email_config() == fm.EmailConfig("a@x.y", "s3cret", "b@x.y", "smtp.x.y", 587)
+
+
+def test_save_email_config_without_credential_store_changes_nothing(data_dir, monkeypatch):
+    class NoStore:
+        def set_password(self, *a):
+            raise RuntimeError("No recommended backend was available")
+
+    monkeypatch.setattr(fm, "_keyring", lambda: NoStore())
+    fm.ENV_FILE.write_text("SMTP_USER=old@x.y\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="backend"):
+        fm.save_email_config(fm.EmailConfig("a@x.y", "pw"))
+    assert fm.ENV_FILE.read_text(encoding="utf-8") == "SMTP_USER=old@x.y\n"
+
+
+def test_password_from_env_when_the_store_has_none(data_dir, monkeypatch):
+    monkeypatch.setenv("SMTP_USER", "a@x.y")
+    monkeypatch.setenv("SMTP_PASSWORD", "from-env")
+    assert fm.email_config().password == "from-env"
+    fm._keyring().set_password(fm.KEYRING_SERVICE, "a@x.y", "from-store")
+    assert fm.email_config().password == "from-store"
 
 
 class FakeSMTP:
@@ -143,7 +158,7 @@ def test_send_email_ssl_on_465(data_dir, smtp):
     assert smtp == [
         ("connect", "FakeSMTP_SSL", "smtp.gmail.com", 465),
         ("login", "me@gmail.com", "abcdefghijklmnop"),
-        ("sendmail", "me@gmail.com", ("me@gmail.com",)),  # recipient defaults to sender
+        ("sendmail", "me@gmail.com", ("me@gmail.com",)),
     ]
 
 
@@ -157,9 +172,6 @@ def test_send_email_skips_without_account(data_dir, smtp):
     assert smtp == []
 
 
-# --------------------------------------------------------------------------- #
-# When to email
-# --------------------------------------------------------------------------- #
 def result(light="", new_low=False, best=True, failure=""):
     search = fm.build_search(
         "AMS", "GRU", ("KL",), 0, dt.date(2026, 12, 1), dt.date(2026, 12, 2), 15, 1, ("EUR",)
@@ -176,7 +188,7 @@ def result(light="", new_low=False, best=True, failure=""):
         (result("LOW"), True, True, False),
         (result("NORMAL"), True, False, False),
         (result("HIGH", new_low=True), True, True, False),
-        (result(best=False), True, True, False),  # no offers: always worth a warning
+        (result(best=False), True, True, False),
         (result("NORMAL", failure="quota"), True, True, False),
     ],
 )
@@ -211,7 +223,7 @@ def eur(price):
 
 def test_email_only_on_low(data_dir, monkeypatch, sent):
     run_with(monkeypatch, [eur(1100)], email_when="low", low_eur=1000, high_eur=1250)
-    assert sent[0].startswith("[NORMAL]")  # the very first price is an all-time low
+    assert sent[0].startswith("[NORMAL]")
     sent.clear()
     fm.update_best([fm.offer_row(eur(900), "t")])
     run_with(monkeypatch, [eur(1100)], email_when="low", low_eur=1000, high_eur=1250)

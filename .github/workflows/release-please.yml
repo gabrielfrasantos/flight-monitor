@@ -1,9 +1,5 @@
 name: release-please
 
-# Opens/updates the release PR (version bump + CHANGELOG.md) from Conventional
-# Commits on main; merging it tags the release, publishes the GitHub release and
-# attaches the Windows installer. Nothing goes to PyPI.
-
 on:
   workflow_dispatch:
   push:

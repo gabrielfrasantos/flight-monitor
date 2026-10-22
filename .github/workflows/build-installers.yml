@@ -1,15 +1,11 @@
 name: Build Installers
 
 on:
-  # Called by release-please.yml after a release is created. (`release: published`
-  # does not fire for releases made with GITHUB_TOKEN.)
   workflow_call:
     inputs:
       tag_name:
         required: true
         type: string
-  # Manual: Actions -> Build Installers -> Run workflow. With a tag, the installer is
-  # attached to that release (backfill); without one it is only built as an artifact.
   workflow_dispatch:
     inputs:
       tag_name:
@@ -17,7 +13,6 @@ on:
         required: false
         type: string
         default: ""
-  # PRs touching the app or its packaging build and smoke-test the installer too.
   pull_request:
     paths:
       - "**.py"
@@ -65,7 +60,6 @@ jobs:
           Get-Content "$env:FLIGHT_MONITOR_HOME\data\monitor.log" -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { throw "smoke test failed (exit $($p.ExitCode))" }
 
-      # Inno Setup is pre-installed on windows-latest runners.
       - name: Build Windows installer
         shell: pwsh
         run: |

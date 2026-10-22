@@ -26,7 +26,7 @@ data/                  — runtime only, gitignored: price_history.csv, run_summ
 ## Where files live
 
 - `app_home()`: next to the scripts in a checkout; `%APPDATA%\flight-monitor` for the frozen app (its install folder is read-only); `FLIGHT_MONITOR_HOME` overrides. `.env` and `data/` live there. Never write next to `sys.executable`.
-- Secrets (email password, API keys) go to `.env` only; settings, schedule and email policy to `data/settings.json`; app bookkeeping to `data/state.json`.
+- The email password goes to the OS credential store (`keyring`; Windows Credential Manager), never to a file; `.env` keeps the account details and engine API keys (a hand-written `SMTP_PASSWORD` / `GMAIL_APP_PASSWORD` is still read). Settings, schedule and email policy go to `data/settings.json`; app bookkeeping to `data/state.json`.
 
 ## Price engines
 
@@ -62,7 +62,7 @@ data/                  — runtime only, gitignored: price_history.csv, run_summ
 
 - PEP 8, line length 100, `ruff` (lint + format) authoritative; `mypy` on `engines.py` and `flight_monitor.py`.
 - `from __future__ import annotations` at the top of every module; type annotations on public functions.
-- Comments only for non-obvious *why*. No `TODO`/`FIXME`.
+- No comments in code (Python, spec, Inno Setup, workflows). Only tool directives stay: shebangs, `# noqa`, `# x-release-please-version`, and the `# vX.Y.Z` tags on SHA-pinned actions that Dependabot updates. Docstrings document modules and public functions. No `TODO`/`FIXME`.
 - Log through `log()` / the `flight_monitor` logger, not `print` (except CLI output like `--list-engines`).
 
 ## Testing

@@ -59,16 +59,13 @@ from engines import AUTO, AUTO_ORDER, ENGINES, Offer, Search, sweep
 
 __version__ = "0.1.0"  # x-release-please-version
 
-FROZEN = bool(getattr(sys, "frozen", False))  # running from the installed (PyInstaller) app
+FROZEN = bool(getattr(sys, "frozen", False))
 
-# --------------------------------------------------------------------------- #
-# Defaults -- overridden by data/settings.json, then by CLI args.
-# --------------------------------------------------------------------------- #
 DEFAULTS: dict[str, Any] = {
     "origin": "AMS",
     "destination": "GRU",
-    "airline": "KL",  # carrier code(s), comma-separated; "ANY" = all
-    "max_stops": "0",  # 0 = direct only; 1 = up to one stopover; "any"
+    "airline": "KL",
+    "max_stops": "0",
     "start": "2026-12-01",
     "end": "2027-01-28",
     "stay_days": 15,
@@ -77,23 +74,22 @@ DEFAULTS: dict[str, Any] = {
     "engine": AUTO,
     "low_eur": 1000.0,
     "high_eur": 1250.0,
-    "email_when": "always",  # "always", "low" (LOW, new lows, problems) or "never"
-    "auto_run": FROZEN,  # the installed app runs the monitor itself
+    "email_when": "always",
+    "auto_run": FROZEN,
     "run_times": "08:00,20:00",
 }
 EMAIL_WHEN = ("always", "low", "never")
 
-# --------------------------------------------------------------------------- #
-# Fixed (non-parameter) config
-# --------------------------------------------------------------------------- #
 ADULTS = 1
 
-MIN_HISTORY_RUNS = 6  # runs of fixed thresholds before auto median
-BAND = 0.10  # +/-10% band around the median for LOW/HIGH
+MIN_HISTORY_RUNS = 6
+BAND = 0.10
 
-RUN_GRACE = dt.timedelta(hours=6)  # a run missed while the PC slept still happens this late
+RUN_GRACE = dt.timedelta(hours=6)
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
+KEYRING_SERVICE = "flight-monitor"
+PASSWORD_ENV = ("SMTP_PASSWORD", "GMAIL_APP_PASSWORD")
 
 
 def app_home() -> Path:
@@ -120,19 +116,16 @@ def app_home() -> Path:
 HOME = app_home()
 ENV_FILE = HOME / ".env"
 DATA_DIR = HOME / "data"
-HISTORY_CSV = DATA_DIR / "price_history.csv"  # every offer, every run
-RUNS_CSV = DATA_DIR / "run_summary.csv"  # one row per run (for median)
-BEST_JSON = DATA_DIR / "best_prices.json"  # all-time low per currency
-SETTINGS_JSON = DATA_DIR / "settings.json"  # saved defaults (GUI)
-STATE_JSON = DATA_DIR / "state.json"  # app bookkeeping (last automatic run)
+HISTORY_CSV = DATA_DIR / "price_history.csv"
+RUNS_CSV = DATA_DIR / "run_summary.csv"
+BEST_JSON = DATA_DIR / "best_prices.json"
+SETTINGS_JSON = DATA_DIR / "settings.json"
+STATE_JSON = DATA_DIR / "state.json"
 LOG_FILE = DATA_DIR / "monitor.log"
 
 logger = logging.getLogger("flight_monitor")
 
 
-# --------------------------------------------------------------------------- #
-# Parameters (CLI, with defaults)
-# --------------------------------------------------------------------------- #
 def parse_airlines(text: str) -> tuple[str, ...]:
     codes = tuple(c.strip().upper() for c in str(text).replace("+", ",").split(",") if c.strip())
     return () if "ANY" in codes else codes
@@ -376,9 +369,6 @@ def search_from_settings(s: dict) -> Search:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
 def setup_logging() -> None:
     """monitor.log, plus the console when there is one (pythonw has none)."""
     if logger.handlers:
@@ -409,27 +399,33 @@ def load_dotenv() -> None:
         os.environ.setdefault(key.strip(), val.strip())
 
 
-def set_env_value(key: str, value: str) -> None:
-    """Write KEY=value into .env (replacing an existing line) and the live environment."""
+def update_env(changes: dict[str, str | None]) -> None:
+    """Set (str) or remove (None) keys in .env and the live environment."""
     lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
-    out, done = [], False
+    out, written = [], set()
     for line in lines:
         name = line.partition("=")[0].strip()
-        if name == key and not line.lstrip().startswith("#"):
-            if not done:
-                out.append(f"{key}={value}")
-                done = True
+        if name in changes and not line.lstrip().startswith("#"):
+            value = changes[name]
+            if value is not None and name not in written:
+                out.append(f"{name}={value}")
+                written.add(name)
             continue
         out.append(line)
-    if not done:
-        out.append(f"{key}={value}")
+    out += [f"{k}={v}" for k, v in changes.items() if v is not None and k not in written]
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
-    os.environ[key] = value
+    for k, v in changes.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
-# --------------------------------------------------------------------------- #
-# Traffic light
-# --------------------------------------------------------------------------- #
+def set_env_value(key: str, value: str) -> None:
+    update_env({key: value})
+
+
 def past_run_low_eur() -> list[float]:
     if not RUNS_CSV.exists():
         return []
@@ -464,9 +460,6 @@ def classify(current_eur: float, low_eur: float, high_eur: float):
     return light, "auto-median", med
 
 
-# --------------------------------------------------------------------------- #
-# Persistence
-# --------------------------------------------------------------------------- #
 HIST_FIELDS = ["checked_at", "currency", "depart", "return", "price", "out_dep_time"]
 RUN_FIELDS = [
     "run_time",
@@ -521,9 +514,6 @@ def update_best(rows: list[dict], save: bool = True) -> dict:
     return improved
 
 
-# --------------------------------------------------------------------------- #
-# Email
-# --------------------------------------------------------------------------- #
 LIGHT_EMOJI = {"LOW": "\U0001f7e2", "NORMAL": "\U0001f7e1", "HIGH": "\U0001f534"}
 CURRENCY_SIGN = {"EUR": "€", "BRL": "R$ ", "USD": "$", "GBP": "£"}
 
@@ -534,7 +524,7 @@ def money(currency: str, amount: float) -> str:
 
 @dataclass
 class EmailConfig:
-    user: str = ""  # sending account
+    user: str = ""
     password: str = ""
     recipient: str = ""
     host: str = SMTP_HOST
@@ -545,16 +535,38 @@ class EmailConfig:
         return bool(self.user and self.password)
 
 
+def _keyring():
+    try:
+        import keyring
+    except ImportError:
+        return None
+    return keyring
+
+
+def stored_password(user: str) -> str:
+    """The account's password from the OS credential store (Windows Credential Manager)."""
+    kr = _keyring()
+    if not user or kr is None:
+        return ""
+    try:
+        return kr.get_password(KEYRING_SERVICE, user) or ""
+    except Exception as e:
+        logger.debug("Credential store unavailable: %s", e)
+        return ""
+
+
 def email_config() -> EmailConfig:
-    """The email account from the environment / .env (GMAIL_* are the older names)."""
+    """The email account: details from the environment / .env, the password from the
+    credential store, else from .env (SMTP_PASSWORD, or the older GMAIL_* names)."""
     user = os.environ.get("SMTP_USER") or os.environ.get("GMAIL_USER", "")
     try:
         port = int(os.environ.get("SMTP_PORT") or SMTP_PORT)
     except ValueError:
         port = SMTP_PORT
+    env_password = next((os.environ[k] for k in PASSWORD_ENV if os.environ.get(k)), "")
     return EmailConfig(
         user=user,
-        password=os.environ.get("SMTP_PASSWORD") or os.environ.get("GMAIL_APP_PASSWORD", ""),
+        password=stored_password(user) or env_password,
         recipient=os.environ.get("REPORT_EMAIL") or user,
         host=os.environ.get("SMTP_HOST") or SMTP_HOST,
         port=port,
@@ -562,14 +574,29 @@ def email_config() -> EmailConfig:
 
 
 def save_email_config(cfg: EmailConfig) -> None:
-    for key, value in (
-        ("SMTP_USER", cfg.user),
-        ("SMTP_PASSWORD", cfg.password),
-        ("REPORT_EMAIL", cfg.recipient),
-        ("SMTP_HOST", cfg.host),
-        ("SMTP_PORT", str(cfg.port)),
-    ):
-        set_env_value(key, value)
+    """Password to the OS credential store, never to a file; the rest to .env.
+
+    Raises (leaving .env untouched) when there is no usable credential store.
+    """
+    kr = _keyring()
+    if kr is None:
+        raise RuntimeError("the keyring package is missing: pip install -r requirements.txt")
+    if cfg.password:
+        kr.set_password(KEYRING_SERVICE, cfg.user, cfg.password)
+    else:
+        try:
+            kr.delete_password(KEYRING_SERVICE, cfg.user)
+        except Exception as e:
+            logger.debug("No stored password to delete: %s", e)
+    update_env(
+        {
+            "SMTP_USER": cfg.user,
+            "REPORT_EMAIL": cfg.recipient,
+            "SMTP_HOST": cfg.host,
+            "SMTP_PORT": str(cfg.port),
+            **dict.fromkeys(PASSWORD_ENV),
+        }
+    )
 
 
 def send_email(to_addr: str, subject: str, body: str, cfg: EmailConfig | None = None) -> None:
@@ -587,7 +614,7 @@ def send_email(to_addr: str, subject: str, body: str, cfg: EmailConfig | None = 
     msg["From"] = cfg.user
     msg["To"] = to_addr
     ctx = ssl.create_default_context()
-    password = cfg.password.replace(" ", "")  # Google shows App Passwords in groups of 4
+    password = cfg.password.replace(" ", "")
     if cfg.port == 465:
         with smtplib.SMTP_SSL(cfg.host, cfg.port, context=ctx, timeout=30) as s:
             s.login(cfg.user, password)
@@ -616,21 +643,18 @@ def _send_quietly(to_addr: str, subject: str, body: str) -> None:
         log(f"Email FAILED: {e}")
 
 
-# --------------------------------------------------------------------------- #
-# Run
-# --------------------------------------------------------------------------- #
 @dataclass
 class RunResult:
     search: Search
     engine: str = ""
     offers: list[Offer] = field(default_factory=list)
     errors: int = 0
-    best: dict[str, Offer] = field(default_factory=dict)  # cheapest per currency
-    light: str = ""  # LOW / NORMAL / HIGH; "" without an EUR price
+    best: dict[str, Offer] = field(default_factory=dict)
+    light: str = ""
     mode: str = ""
     median: float | None = None
-    new_low: bool = False  # beat the all-time EUR low
-    failure: str = ""  # why the sweep was cut short (EngineError)
+    new_low: bool = False
+    failure: str = ""
     cancelled: bool = False
 
 
@@ -717,7 +741,6 @@ def run_monitor(
 
     if not r.best:
         log(f"No {route} offers found this run. ({r.errors} errors)")
-        # Still notify so silence never hides a scraper break.
         if send and wants_email(r, email_when):
             _send_quietly(
                 recipient,
@@ -739,7 +762,6 @@ def run_monitor(
 
     if record:
         append_rows(HISTORY_CSV, HIST_FIELDS, rows)
-        # Record this run's summary (used for future median baseline).
         if eur:
             append_rows(
                 RUNS_CSV,
@@ -781,9 +803,6 @@ def list_engines() -> str:
     return "Price engines (free first):\n" + "\n".join(rows)
 
 
-# --------------------------------------------------------------------------- #
-# Main
-# --------------------------------------------------------------------------- #
 def main(argv=None) -> int:
     load_dotenv()
     setup_logging()

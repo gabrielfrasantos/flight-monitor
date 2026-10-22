@@ -67,9 +67,6 @@ def test_bad_saved_dates_fall_back_to_defaults(data_dir):
         app.processEvents()
 
 
-# --------------------------------------------------------------------------- #
-# Email settings dialog
-# --------------------------------------------------------------------------- #
 @pytest.fixture
 def no_message_boxes(monkeypatch):
     shown = []
@@ -89,7 +86,23 @@ def test_email_dialog_saves_account_and_policy(window, no_message_boxes):
     dialog.accept()
     cfg = fm.email_config()
     assert (cfg.user, cfg.recipient, cfg.port) == ("me@gmail.com", "you@example.com", 465)
+    assert cfg.password == "abcd efgh ijkl mnop"
+    assert "abcd" not in fm.ENV_FILE.read_text(encoding="utf-8")
     assert fm.load_settings()["email_when"] == "low"
+
+
+def test_email_dialog_reports_a_missing_credential_store(window, monkeypatch, no_message_boxes):
+    class NoStore:
+        def set_password(self, *a):
+            raise RuntimeError("No recommended backend was available")
+
+    monkeypatch.setattr(fm, "_keyring", lambda: NoStore())
+    dialog = gui.EmailDialog(window)
+    dialog._user_edit.setText("me@gmail.com")
+    dialog._password_edit.setText("pw")
+    dialog.accept()
+    assert no_message_boxes[-1][0] == "warning" and dialog.result() == 0
+    assert not fm.ENV_FILE.exists()
 
 
 def test_email_dialog_test_button(window, monkeypatch, no_message_boxes):
@@ -97,17 +110,14 @@ def test_email_dialog_test_button(window, monkeypatch, no_message_boxes):
     monkeypatch.setattr(fm, "send_email", lambda to, subject, body, cfg: sent.append((to, cfg)))
     dialog = gui.EmailDialog(window)
     dialog._send_test()
-    assert sent == [] and no_message_boxes[-1][0] == "warning"  # no account yet
+    assert sent == [] and no_message_boxes[-1][0] == "warning"
     dialog._user_edit.setText("me@gmail.com")
     dialog._password_edit.setText("pw")
     dialog._send_test()
     assert sent[0][0] == "me@gmail.com" and no_message_boxes[-1][0] == "information"
-    assert fm.email_config().user == ""  # testing doesn't save
+    assert fm.email_config().user == ""
 
 
-# --------------------------------------------------------------------------- #
-# Automatic runs
-# --------------------------------------------------------------------------- #
 def test_schedule_controls_save_immediately(window, no_message_boxes):
     window._times_edit.setText("21:30,7:05")
     window._auto_check.setChecked(True)
@@ -141,7 +151,7 @@ def test_due_slot_starts_a_recorded_emailed_run(window, monkeypatch, started):
 
 def test_no_run_when_off_or_window_over(window, monkeypatch, started):
     monkeypatch.setattr(fm, "due_run", lambda now, times, last: now)
-    window._tick_schedule()  # auto_run off in a checkout by default
+    window._tick_schedule()
     fm.save_settings({"auto_run": True, "start": "2020-01-01", "end": "2020-01-31"})
     window._tick_schedule()
     assert started == []
@@ -172,9 +182,6 @@ def test_close_hides_to_tray(window):
     assert not window.isVisible() and "tray" in tray.notes[0]
 
 
-# --------------------------------------------------------------------------- #
-# Desktop integration
-# --------------------------------------------------------------------------- #
 def test_icon_and_version_parsing():
     import desktop
 
@@ -183,31 +190,37 @@ def test_icon_and_version_parsing():
     assert desktop.parse_version("garbage") == (0,)
 
 
-def test_single_instance_hands_over_to_the_running_copy():
-    from PySide6.QtCore import QCoreApplication, QElapsedTimer
+def _send_from_thread(instance, message):
+    """Send like a second process would: the client blocks until the server acknowledges,
+    so the server's event loop (this thread) must keep running meanwhile."""
+    import threading
 
+    from PySide6.QtCore import QCoreApplication
+
+    result = []
+    worker = threading.Thread(target=lambda: result.append(instance.send(message)))
+    worker.start()
+    while worker.is_alive():
+        QCoreApplication.processEvents()
+    worker.join()
+    return result[0]
+
+
+def test_single_instance_hands_over_to_the_running_copy():
     import desktop
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     key = f"flight-monitor-test-{os.getpid()}"
-    first, second = desktop.SingleInstance(key), desktop.SingleInstance(key)
-    shown = []
+    first = desktop.SingleInstance(key)
+    shown, quits = [], []
     first.activated.connect(lambda: shown.append(True))
-    assert first.already_running() is False
-    assert second.already_running() is True
-    timer = QElapsedTimer()
-    timer.start()
-    while not shown and timer.elapsed() < 3000:
-        QCoreApplication.processEvents()
-    assert shown
-
-    quits = []
     first.quit_requested.connect(lambda: quits.append(True))
-    assert desktop.SingleInstance(key).send(b"quit") is True
-    timer.restart()
-    while not quits and timer.elapsed() < 3000:
-        QCoreApplication.processEvents()
-    assert quits and len(shown) == 1
+    assert first.already_running() is False
+
+    assert _send_from_thread(desktop.SingleInstance(key), b"show") is True
+    assert shown == [True] and quits == []
+    assert _send_from_thread(desktop.SingleInstance(key), b"quit") is True
+    assert quits == [True] and shown == [True]
     assert desktop.SingleInstance(f"{key}-nobody").send(b"quit") is False
     del app
 

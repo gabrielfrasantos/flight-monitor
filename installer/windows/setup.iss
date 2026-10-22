@@ -1,12 +1,3 @@
-; Inno Setup script for the Flight Monitor installer (Windows).
-; Build:  iscc installer\windows\setup.iss /DAppVersion=0.2.0
-; Input:  dist\flight-monitor\  (pyinstaller flight-monitor.spec)
-; Output: installer-output\flight-monitor-0.2.0-windows-setup.exe
-;
-; Installs per user (no admin). The "start with Windows" task (on by default)
-; launches the app minimized to the tray at login, where it runs the monitor on
-; its schedule. User data stays in %APPDATA%\flight-monitor, also on uninstall.
-
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
@@ -28,12 +19,9 @@ SetupIconFile=..\..\assets\icon.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; Run as user -- no admin required for autopf on modern Windows
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 UninstallDisplayIcon={app}\flight-monitor.exe
-; The app lives in the tray: [Code] asks it to quit (flight-monitor.exe --quit)
-; before files are replaced or removed; the Restart Manager is the fallback.
 CloseApplications=yes
 RestartApplications=no
 
@@ -47,7 +35,6 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
       GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [InstallDelete]
-; An upgrade must not keep libraries the new version no longer ships.
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
@@ -76,7 +63,7 @@ begin
   begin
     Exec(ExpandConstant('{app}\flight-monitor.exe'), '--quit', '', SW_HIDE,
          ewWaitUntilTerminated, ResultCode);
-    Sleep(2000);  { let it finish shutting down and release its files }
+    Sleep(2000);
   end;
 end;
 
