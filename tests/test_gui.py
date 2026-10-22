@@ -29,8 +29,12 @@ def test_window_shows_saved_settings_and_saves_back(data_dir, window):
     window._save_defaults()
 
     saved = fm.load_settings()
-    assert (saved["airline"], saved["max_stops"], saved["engine"], saved["currencies"]) == \
-        ("KL,AF", "any", "google-scrape", "EUR")
+    assert (saved["airline"], saved["max_stops"], saved["engine"], saved["currencies"]) == (
+        "KL,AF",
+        "any",
+        "google-scrape",
+        "EUR",
+    )
     search = window._build_search()
     assert search.airlines == ("KL", "AF") and search.max_stops is None
 

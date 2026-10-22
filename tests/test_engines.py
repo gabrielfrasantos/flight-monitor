@@ -3,16 +3,32 @@ import datetime as dt
 import pytest
 
 import engines
-from engines import (AUTO, EngineError, IgnavEngine, Offer, Search, SerpApiEngine,
-                     TravelpayoutsEngine, sweep)
+from engines import (
+    AUTO,
+    EngineError,
+    IgnavEngine,
+    Offer,
+    Search,
+    SerpApiEngine,
+    TravelpayoutsEngine,
+    sweep,
+)
 
 D1 = dt.date(2026, 12, 1)
 R1 = dt.date(2026, 12, 16)
 
 
 def make_search(**kw):
-    base = dict(origin="AMS", destination="GRU", start=D1, end=dt.date(2026, 12, 3),
-                stay_days=15, airlines=("KL",), max_stops=0, currencies=("EUR",))
+    base = {
+        "origin": "AMS",
+        "destination": "GRU",
+        "start": D1,
+        "end": dt.date(2026, 12, 3),
+        "stay_days": 15,
+        "airlines": ("KL",),
+        "max_stops": 0,
+        "currencies": ("EUR",),
+    }
     base.update(kw)
     return Search(**base)
 
@@ -34,13 +50,16 @@ def test_departures_honor_step():
     assert s.return_of(D1) == R1
 
 
-@pytest.mark.parametrize("carriers, stops, ok", [
-    (["KL"], 0, True),
-    (["KL"], 1, False),          # too many stops
-    (["AF"], 0, False),          # other airline
-    (["KL", "AF"], 0, False),    # codeshare leg outside the filter
-    ([], None, True),            # unknown: trust the engine's own filter
-])
+@pytest.mark.parametrize(
+    "carriers, stops, ok",
+    [
+        (["KL"], 0, True),
+        (["KL"], 1, False),  # too many stops
+        (["AF"], 0, False),  # other airline
+        (["KL", "AF"], 0, False),  # codeshare leg outside the filter
+        ([], None, True),  # unknown: trust the engine's own filter
+    ],
+)
 def test_accepts(carriers, stops, ok):
     assert make_search().accepts(carriers, stops) is ok
 
@@ -54,10 +73,22 @@ def test_any_airline_any_stops_accepts_everything():
 # --------------------------------------------------------------------------- #
 # Travelpayouts
 # --------------------------------------------------------------------------- #
-def tp_row(price, airline="KL", transfers=0, ret_transfers=0, dep="2026-12-01T10:55:00+01:00",
-           ret="2026-12-16T20:59:00-03:00"):
-    return {"price": price, "airline": airline, "transfers": transfers,
-            "return_transfers": ret_transfers, "departure_at": dep, "return_at": ret}
+def tp_row(
+    price,
+    airline="KL",
+    transfers=0,
+    ret_transfers=0,
+    dep="2026-12-01T10:55:00+01:00",
+    ret="2026-12-16T20:59:00-03:00",
+):
+    return {
+        "price": price,
+        "airline": airline,
+        "transfers": transfers,
+        "return_transfers": ret_transfers,
+        "departure_at": dep,
+        "return_at": ret,
+    }
 
 
 def test_travelpayouts_picks_cheapest_matching_row(monkeypatch):
@@ -66,12 +97,17 @@ def test_travelpayouts_picks_cheapest_matching_row(monkeypatch):
 
     def fake_get(url, params):
         seen.update(params)
-        return {"success": True, "currency": "eur", "data": [
-            tp_row(700, airline="AF"),                       # wrong airline
-            tp_row(650, transfers=1),                        # not direct
-            tp_row(600, ret="2026-12-17T10:00:00-03:00"),    # wrong return date
-            tp_row(990), tp_row(950),
-        ]}
+        return {
+            "success": True,
+            "currency": "eur",
+            "data": [
+                tp_row(700, airline="AF"),  # wrong airline
+                tp_row(650, transfers=1),  # not direct
+                tp_row(600, ret="2026-12-17T10:00:00-03:00"),  # wrong return date
+                tp_row(990),
+                tp_row(950),
+            ],
+        }
 
     monkeypatch.setattr(eng, "_get_json", fake_get)
     offer = eng.fetch(make_search(), D1, "EUR")
@@ -97,11 +133,15 @@ def test_missing_key_stops_the_engine(monkeypatch):
 # --------------------------------------------------------------------------- #
 def ignav_itinerary(amount, out_codes=("KL",), back_codes=("KL",), currency="EUR"):
     def segs(codes, day):
-        return [{"marketing_carrier_code": c, "departure_time_local": f"{day}T10:55:00"}
-                for c in codes]
-    return {"price": {"amount": amount, "currency": currency},
-            "outbound": {"segments": segs(out_codes, "2026-12-01")},
-            "inbound": {"segments": segs(back_codes, "2026-12-16")}}
+        return [
+            {"marketing_carrier_code": c, "departure_time_local": f"{day}T10:55:00"} for c in codes
+        ]
+
+    return {
+        "price": {"amount": amount, "currency": currency},
+        "outbound": {"segments": segs(out_codes, "2026-12-01")},
+        "inbound": {"segments": segs(back_codes, "2026-12-16")},
+    }
 
 
 def test_ignav_request_and_parse(monkeypatch):
@@ -110,11 +150,14 @@ def test_ignav_request_and_parse(monkeypatch):
 
     def fake_post(url, body, headers):
         sent.update(body=body, headers=headers)
-        return {"itineraries": [
-            ignav_itinerary(800, out_codes=("KL", "AF")),    # 1 stop + other airline
-            ignav_itinerary(500, currency="USD"),            # other currency
-            ignav_itinerary(1010), ignav_itinerary(995),
-        ]}
+        return {
+            "itineraries": [
+                ignav_itinerary(800, out_codes=("KL", "AF")),  # 1 stop + other airline
+                ignav_itinerary(500, currency="USD"),  # other currency
+                ignav_itinerary(1010),
+                ignav_itinerary(995),
+            ]
+        }
 
     monkeypatch.setattr(eng, "_post_json", fake_post)
     offer = eng.fetch(make_search(), D1, "EUR")
@@ -138,8 +181,9 @@ def test_http_auth_and_quota_errors_stop_the_engine():
 # SerpApi
 # --------------------------------------------------------------------------- #
 def serp_option(price, numbers=("KL 791",)):
-    legs = [{"flight_number": n, "departure_airport": {"time": "2026-12-01 10:55"}}
-            for n in numbers]
+    legs = [
+        {"flight_number": n, "departure_airport": {"time": "2026-12-01 10:55"}} for n in numbers
+    ]
     return {"price": price, "flights": legs}
 
 
@@ -149,8 +193,10 @@ def test_serpapi_request_and_parse(monkeypatch):
 
     def fake_get(url, params):
         sent.update(params)
-        return {"best_flights": [serp_option(1100)],
-                "other_flights": [serp_option(990), serp_option(700, ("KL 1", "AF 2"))]}
+        return {
+            "best_flights": [serp_option(1100)],
+            "other_flights": [serp_option(990), serp_option(700, ("KL 1", "AF 2"))],
+        }
 
     monkeypatch.setattr(eng, "_get_json", fake_get)
     offer = eng.fetch(make_search(), D1, "EUR")
@@ -160,11 +206,15 @@ def test_serpapi_request_and_parse(monkeypatch):
 
 def test_serpapi_no_results_and_out_of_searches(monkeypatch):
     eng = SerpApiEngine("key")
-    monkeypatch.setattr(eng, "_get_json", lambda url, params: {
-        "error": "Google Flights hasn't returned any results for this query."})
+    monkeypatch.setattr(
+        eng,
+        "_get_json",
+        lambda url, params: {"error": "Google Flights hasn't returned any results for this query."},
+    )
     assert eng.fetch(make_search(), D1, "EUR") is None
-    monkeypatch.setattr(eng, "_get_json", lambda url, params: {
-        "error": "Your account has run out of searches."})
+    monkeypatch.setattr(
+        eng, "_get_json", lambda url, params: {"error": "Your account has run out of searches."}
+    )
     with pytest.raises(EngineError):
         eng.fetch(make_search(), D1, "EUR")
 
@@ -192,12 +242,12 @@ def fakes(monkeypatch):
         registry = {k: fake_engine(k, b) for k, b in behaviors.items()}
         monkeypatch.setattr(engines, "ENGINES", registry)
         monkeypatch.setattr(engines, "AUTO_ORDER", list(registry))
+
     return install
 
 
 def offers_for(*currencies):
-    return lambda search: [Offer(c, D1, R1, 100.0) for c in search.currencies
-                           if c in currencies]
+    return lambda search: [Offer(c, D1, R1, 100.0) for c in search.currencies if c in currencies]
 
 
 def test_auto_falls_back_per_currency(fakes):
@@ -209,7 +259,7 @@ def test_auto_falls_back_per_currency(fakes):
 
     fakes(first=offers_for("BRL"), second=second)
     r = sweep(make_search(currencies=("EUR", "BRL")), AUTO)
-    assert asked == [("EUR",)]                       # second engine only for what's missing
+    assert asked == [("EUR",)]  # second engine only for what's missing
     assert sorted(o.currency for o in r.offers) == ["BRL", "EUR"]
     assert r.engine == "first+second" and r.failure == ""
 
@@ -222,7 +272,7 @@ def test_auto_keeps_going_after_engine_error_and_keeps_partial_offers(fakes):
     fakes(first=broken, second=offers_for("BRL"))
     r = sweep(make_search(currencies=("EUR", "BRL")), AUTO)
     assert sorted(o.currency for o in r.offers) == ["BRL", "EUR"]
-    assert r.failure == ""                           # everything got covered
+    assert r.failure == ""  # everything got covered
     assert r.errors == 1
 
 

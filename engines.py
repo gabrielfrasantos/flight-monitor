@@ -28,6 +28,10 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from primp import Client
 
 logger = logging.getLogger("flight_monitor")
 
@@ -48,11 +52,11 @@ class EngineError(RuntimeError):
 class Search:
     origin: str
     destination: str
-    start: dt.date                       # first outbound date
-    end: dt.date                         # last outbound date
-    stay_days: int                       # nights between outbound and return
-    airlines: tuple[str, ...] = ()       # carrier codes; empty = any airline
-    max_stops: int | None = 0            # per leg; 0 = direct, None = any
+    start: dt.date  # first outbound date
+    end: dt.date  # last outbound date
+    stay_days: int  # nights between outbound and return
+    airlines: tuple[str, ...] = ()  # carrier codes; empty = any airline
+    max_stops: int | None = 0  # per leg; 0 = direct, None = any
     step_days: int = 1
     currencies: tuple[str, ...] = ("EUR", "BRL")
     adults: int = 1
@@ -91,10 +95,10 @@ class Offer:
     currency: str
     depart: dt.date
     ret: dt.date
-    price: float                  # round-trip total
-    airline: str = ""             # carrier code(s), e.g. "KL" or "KL+AF"
-    stops: int | None = None      # most stops on either leg
-    out_dep_time: str = "--:--"   # outbound departure, local time
+    price: float  # round-trip total
+    airline: str = ""  # carrier code(s), e.g. "KL" or "KL+AF"
+    stops: int | None = None  # most stops on either leg
+    out_dep_time: str = "--:--"  # outbound departure, local time
 
 
 def _cheapest(offers: Iterable[Offer]) -> Offer | None:
@@ -107,7 +111,7 @@ def _carriers(codes: Iterable[str]) -> str:
 
 def _wait(stop: threading.Event | None, seconds: float) -> None:
     if stop is not None:
-        stop.wait(seconds)      # returns early when a stop is requested
+        stop.wait(seconds)  # returns early when a stop is requested
     else:
         time.sleep(seconds)
 
@@ -118,16 +122,16 @@ def _wait(stop: threading.Event | None, seconds: float) -> None:
 class Engine:
     key = ""
     label = ""
-    cost = ""              # short price tag for the picker
-    about = ""             # what it reads and its catch, one or two sentences
-    key_env = ""           # env var holding the API key; "" = no key needed
+    cost = ""  # short price tag for the picker
+    about = ""  # what it reads and its catch, one or two sentences
+    key_env = ""  # env var holding the API key; "" = no key needed
     signup_url = ""
-    pause = (0.0, 0.0)     # politeness between requests (seconds, min/max)
+    pause = (0.0, 0.0)  # politeness between requests (seconds, min/max)
 
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or (os.environ.get(self.key_env, "") if self.key_env else "")
         self.errors = 0
-        self._http = None
+        self._http: Client | None = None
 
     @property
     def ready(self) -> bool:
@@ -141,8 +145,10 @@ class Engine:
     def offers(self, search: Search, stop: threading.Event | None = None) -> Iterator[Offer]:
         """Yield the cheapest offer per (outbound date, currency) found."""
         if not self.ready:
-            raise EngineError(f"{self.label} needs an API key: set {self.key_env} in .env "
-                              f"(sign up: {self.signup_url}).")
+            raise EngineError(
+                f"{self.label} needs an API key: set {self.key_env} in .env "
+                f"(sign up: {self.signup_url})."
+            )
         self.setup(search)
         pairs = [(d, c) for d in search.departures() for c in search.currencies]
         for i, (depart, currency) in enumerate(pairs):
@@ -168,9 +174,10 @@ class Engine:
         raise NotImplementedError
 
     # -- JSON-over-HTTP helpers for the API engines --------------------------
-    def _client(self):
+    def _client(self) -> Client:
         if self._http is None:
             from primp import Client
+
             self._http = Client(timeout=30)
         return self._http
 
@@ -182,8 +189,9 @@ class Engine:
 
     def _json(self, resp) -> dict:
         if resp.status_code in (401, 403):
-            raise EngineError(f"{self.label}: API key rejected (HTTP {resp.status_code}); "
-                              f"check {self.key_env}.")
+            raise EngineError(
+                f"{self.label}: API key rejected (HTTP {resp.status_code}); check {self.key_env}."
+            )
         if resp.status_code == 429:
             raise EngineError(f"{self.label}: rate limit or quota reached (HTTP 429).")
         if resp.status_code >= 400:
@@ -198,23 +206,34 @@ class GoogleCalendarEngine(Engine):
     key = "google-calendar"
     label = "Google Flights - price calendar"
     cost = "free, no key"
-    about = ("Reads Google Flights' price calendar (via the fli library): the whole "
-             "window in 1-2 requests per currency, plus one detail lookup for the "
-             "cheapest date. Fastest, and the least likely to get blocked.")
+    about = (
+        "Reads Google Flights' price calendar (via the fli library): the whole "
+        "window in 1-2 requests per currency, plus one detail lookup for the "
+        "cheapest date. Fastest, and the least likely to get blocked."
+    )
 
     @classmethod
     def requests_for(cls, search: Search) -> int:
-        chunks = -(-((search.end - search.start).days + 1) // 61)   # fli: 61 days a call
+        chunks = -(-((search.end - search.start).days + 1) // 61)  # fli: 61 days a call
         return (chunks + 1) * len(search.currencies)
 
     def offers(self, search: Search, stop: threading.Event | None = None) -> Iterator[Offer]:
         try:
-            from fli.models import (Airline, Airport, DateSearchFilters, FlightSegment,
-                                    MaxStops, PassengerInfo, SeatType, TripType)
+            from fli.models import (
+                Airline,
+                Airport,
+                DateSearchFilters,
+                FlightSegment,
+                MaxStops,
+                PassengerInfo,
+                SeatType,
+                TripType,
+            )
             from fli.search import SearchDates
         except ImportError as e:
-            raise EngineError("google-calendar needs the 'flights' package: "
-                              "pip install -r requirements.txt") from e
+            raise EngineError(
+                "google-calendar needs the 'flights' package: pip install -r requirements.txt"
+            ) from e
 
         def enum(kind, code: str, what: str):
             try:
@@ -230,21 +249,32 @@ class GoogleCalendarEngine(Engine):
         first, last = min(wanted), max(wanted)
         origin = enum(Airport, search.origin, "airport")
         dest = enum(Airport, search.destination, "airport")
-        stops = {None: MaxStops.ANY, 0: MaxStops.NON_STOP,
-                 1: MaxStops.ONE_STOP_OR_FEWER, 2: MaxStops.TWO_OR_FEWER_STOPS}
+        stops = {
+            None: MaxStops.ANY,
+            0: MaxStops.NON_STOP,
+            1: MaxStops.ONE_STOP_OR_FEWER,
+            2: MaxStops.TWO_OR_FEWER_STOPS,
+        }
         filters = DateSearchFilters(
             trip_type=TripType.ROUND_TRIP,
             passenger_info=PassengerInfo(adults=search.adults),
             flight_segments=[
-                FlightSegment(departure_airport=[[origin, 0]], arrival_airport=[[dest, 0]],
-                              travel_date=first.isoformat()),
-                FlightSegment(departure_airport=[[dest, 0]], arrival_airport=[[origin, 0]],
-                              travel_date=search.return_of(first).isoformat()),
+                FlightSegment(
+                    departure_airport=[[origin, 0]],
+                    arrival_airport=[[dest, 0]],
+                    travel_date=first.isoformat(),
+                ),
+                FlightSegment(
+                    departure_airport=[[dest, 0]],
+                    arrival_airport=[[origin, 0]],
+                    travel_date=search.return_of(first).isoformat(),
+                ),
             ],
             stops=stops.get(search.max_stops, MaxStops.ANY),
             seat_type=SeatType.ECONOMY,
             airlines=[enum(Airline, a, "airline") for a in search.airlines] or None,
-            from_date=first.isoformat(), to_date=last.isoformat(),
+            from_date=first.isoformat(),
+            to_date=last.isoformat(),
             duration=search.stay_days,
         )
 
@@ -266,10 +296,16 @@ class GoogleCalendarEngine(Engine):
                     logger.info(f"  calendar {currency}: answered in {p.currency}, skipped.")
                     break
                 # The calendar has prices only; carry over what the filters pin down.
-                found.append(Offer(currency, depart, search.return_of(depart), float(p.price),
-                                   airline=search.airlines[0] if len(search.airlines) == 1
-                                   else "",
-                                   stops=0 if search.max_stops == 0 else None))
+                found.append(
+                    Offer(
+                        currency,
+                        depart,
+                        search.return_of(depart),
+                        float(p.price),
+                        airline=search.airlines[0] if len(search.airlines) == 1 else "",
+                        stops=0 if search.max_stops == 0 else None,
+                    )
+                )
             best = _cheapest(found)
             if best:
                 self._detail(best, search, filters, stop)
@@ -286,9 +322,13 @@ class GoogleCalendarEngine(Engine):
         segments[0].travel_date = offer.depart.isoformat()
         segments[1].travel_date = offer.ret.isoformat()
         exact = FlightSearchFilters(
-            trip_type=filters.trip_type, passenger_info=filters.passenger_info,
-            flight_segments=segments, stops=filters.stops, seat_type=filters.seat_type,
-            airlines=filters.airlines, sort_by=SortBy.CHEAPEST,
+            trip_type=filters.trip_type,
+            passenger_info=filters.passenger_info,
+            flight_segments=segments,
+            stops=filters.stops,
+            seat_type=filters.seat_type,
+            airlines=filters.airlines,
+            sort_by=SortBy.CHEAPEST,
         )
         try:
             results = SearchFlights().search(exact, top_n=1, currency=offer.currency) or []
@@ -308,8 +348,10 @@ class GoogleCalendarEngine(Engine):
             return
         price, trip, carriers, stops = min(trips, key=lambda t: t[0])
         if abs(price - offer.price) >= 1:
-            logger.info(f"  {offer.depart} {offer.currency}: calendar said {offer.price:.0f}, "
-                        f"live price {price:.0f}.")
+            logger.info(
+                f"  {offer.depart} {offer.currency}: calendar said {offer.price:.0f}, "
+                f"live price {price:.0f}."
+            )
             offer.price = float(price)
         offer.airline = _carriers(carriers)
         offer.stops = stops
@@ -320,16 +362,21 @@ class GoogleScrapeEngine(Engine):
     key = "google-scrape"
     label = "Google Flights - result page"
     cost = "free, no key"
-    about = ("Loads one Google Flights result page per date and currency (via "
-             "fast-flights). The original engine; slow (~2 requests per date) and the "
-             "most exposed to blocking, the consent wall and page changes.")
+    about = (
+        "Loads one Google Flights result page per date and currency (via "
+        "fast-flights). The original engine; slow (~2 requests per date) and the "
+        "most exposed to blocking, the consent wall and page changes."
+    )
     pause = (1.2, 2.6)
 
     def setup(self, search: Search) -> None:
         from primp import Client
-        self._http = Client(impersonate="chrome_145", impersonate_os="macos",
-                            referer=True, cookie_store=True)
-        self._http.set_cookies("https://www.google.com", {"SOCS": SOCS_COOKIE})
+
+        client = Client(
+            impersonate="chrome_145", impersonate_os="macos", referer=True, cookie_store=True
+        )
+        client.set_cookies("https://www.google.com", {"SOCS": SOCS_COOKIE})
+        self._http = client
 
     def fetch(self, search: Search, depart: dt.date, currency: str) -> Offer | None:
         from fast_flights import FlightQuery, Passengers, create_query
@@ -340,17 +387,28 @@ class GoogleScrapeEngine(Engine):
         airlines = list(search.airlines) or None
         q = create_query(
             flights=[
-                FlightQuery(date=depart.isoformat(), from_airport=search.origin,
-                            to_airport=search.destination, max_stops=search.max_stops,
-                            airlines=airlines),
-                FlightQuery(date=ret.isoformat(), from_airport=search.destination,
-                            to_airport=search.origin, max_stops=search.max_stops,
-                            airlines=airlines),
+                FlightQuery(
+                    date=depart.isoformat(),
+                    from_airport=search.origin,
+                    to_airport=search.destination,
+                    max_stops=search.max_stops,
+                    airlines=airlines,
+                ),
+                FlightQuery(
+                    date=ret.isoformat(),
+                    from_airport=search.destination,
+                    to_airport=search.origin,
+                    max_stops=search.max_stops,
+                    airlines=airlines,
+                ),
             ],
-            trip="round-trip", seat="economy", passengers=Passengers(adults=search.adults),
-            currency=currency, max_stops=search.max_stops,
+            trip="round-trip",
+            seat="economy",
+            passengers=Passengers(adults=search.adults),
+            currency=currency,
+            max_stops=search.max_stops,
         )
-        html = self._http.get(URL, params=q.params()).text
+        html = self._client().get(URL, params=q.params()).text
         if "consent.google.com" in html[:400]:
             raise EngineError("Hit Google consent wall (refresh SOCS_COOKIE in engines.py).")
         # fast-flights' parser raises (TypeError/IndexError) when Google returns an
@@ -365,8 +423,10 @@ class GoogleScrapeEngine(Engine):
             if f.price is None or not f.flights:
                 continue
             first, last = f.flights[0], f.flights[-1]
-            if (first.from_airport.code != search.origin
-                    or last.to_airport.code != search.destination):
+            if (
+                first.from_airport.code != search.origin
+                or last.to_airport.code != search.destination
+            ):
                 continue
             stops = len(f.flights) - 1
             if not search.accepts([f.type], stops):
@@ -376,9 +436,17 @@ class GoogleScrapeEngine(Engine):
             except (TypeError, ValueError):
                 continue
             t = first.departure.time if first.departure else None
-            found.append(Offer(currency, depart, ret, price, airline=f.type or "",
-                               stops=stops,
-                               out_dep_time=f"{t[0]:02d}:{t[1]:02d}" if t else "--:--"))
+            found.append(
+                Offer(
+                    currency,
+                    depart,
+                    ret,
+                    price,
+                    airline=f.type or "",
+                    stops=stops,
+                    out_dep_time=f"{t[0]:02d}:{t[1]:02d}" if t else "--:--",
+                )
+            )
         return _cheapest(found)
 
 
@@ -389,9 +457,11 @@ class TravelpayoutsEngine(Engine):
     key = "travelpayouts"
     label = "Aviasales price cache (Travelpayouts)"
     cost = "free, token"
-    about = ("Cheapest fares Aviasales users found in the last ~48 h: cached, not "
-             "live, and dates nobody searched come back empty. Free token from a "
-             "Travelpayouts account (Profile > API token).")
+    about = (
+        "Cheapest fares Aviasales users found in the last ~48 h: cached, not "
+        "live, and dates nobody searched come back empty. Free token from a "
+        "Travelpayouts account (Profile > API token)."
+    )
     key_env = "TRAVELPAYOUTS_TOKEN"
     signup_url = "https://www.travelpayouts.com/"
     pause = (0.2, 0.5)
@@ -399,13 +469,23 @@ class TravelpayoutsEngine(Engine):
 
     def fetch(self, search: Search, depart: dt.date, currency: str) -> Offer | None:
         ret = search.return_of(depart)
-        data = self._get_json(self.URL, {
-            "origin": search.origin, "destination": search.destination,
-            "departure_at": depart.isoformat(), "return_at": ret.isoformat(),
-            "one_way": "false", "direct": "true" if search.max_stops == 0 else "false",
-            "currency": currency.lower(), "sorting": "price", "unique": "false",
-            "limit": 100, "page": 1, "token": self.api_key,
-        })
+        data = self._get_json(
+            self.URL,
+            {
+                "origin": search.origin,
+                "destination": search.destination,
+                "departure_at": depart.isoformat(),
+                "return_at": ret.isoformat(),
+                "one_way": "false",
+                "direct": "true" if search.max_stops == 0 else "false",
+                "currency": currency.lower(),
+                "sorting": "price",
+                "unique": "false",
+                "limit": 100,
+                "page": 1,
+                "token": self.api_key,
+            },
+        )
         if data.get("success") is False:
             raise RuntimeError(data.get("error") or "request failed")
         got = (data.get("currency") or currency).upper()
@@ -413,16 +493,26 @@ class TravelpayoutsEngine(Engine):
             raise RuntimeError(f"answered in {got}, not {currency}")
         found = []
         for row in data.get("data") or []:
-            if (str(row.get("departure_at", ""))[:10] != depart.isoformat()
-                    or str(row.get("return_at", ""))[:10] != ret.isoformat()):
+            if (
+                str(row.get("departure_at", ""))[:10] != depart.isoformat()
+                or str(row.get("return_at", ""))[:10] != ret.isoformat()
+            ):
                 continue
             stops = max(int(row.get("transfers") or 0), int(row.get("return_transfers") or 0))
             airline = row.get("airline") or ""
             if row.get("price") is None or not search.accepts([airline], stops):
                 continue
-            found.append(Offer(currency, depart, ret, float(row["price"]), airline=airline,
-                               stops=stops,
-                               out_dep_time=str(row["departure_at"])[11:16] or "--:--"))
+            found.append(
+                Offer(
+                    currency,
+                    depart,
+                    ret,
+                    float(row["price"]),
+                    airline=airline,
+                    stops=stops,
+                    out_dep_time=str(row["departure_at"])[11:16] or "--:--",
+                )
+            )
         return _cheapest(found)
 
 
@@ -433,23 +523,42 @@ class IgnavEngine(Engine):
     key = "ignav"
     label = "Ignav fare API"
     cost = "1,000 free requests, then $2 per 1,000"
-    about = ("Live fares. One request per date and currency, so the one-time free "
-             "allowance covers about 8 full default sweeps. Currency follows the "
-             "market (EUR = NL, BRL = BR point of sale).")
+    about = (
+        "Live fares. One request per date and currency, so the one-time free "
+        "allowance covers about 8 full default sweeps. Currency follows the "
+        "market (EUR = NL, BRL = BR point of sale)."
+    )
     key_env = "IGNAV_API_KEY"
     signup_url = "https://ignav.com/signup"
     URL = "https://ignav.com/api/fares/round-trip"
-    MARKETS = {"EUR": "NL", "BRL": "BR", "USD": "US", "GBP": "GB", "CHF": "CH",
-               "CAD": "CA", "AUD": "AU", "JPY": "JP", "SEK": "SE", "NOK": "NO", "DKK": "DK"}
+    MARKETS = {
+        "EUR": "NL",
+        "BRL": "BR",
+        "USD": "US",
+        "GBP": "GB",
+        "CHF": "CH",
+        "CAD": "CA",
+        "AUD": "AU",
+        "JPY": "JP",
+        "SEK": "SE",
+        "NOK": "NO",
+        "DKK": "DK",
+    }
 
     def fetch(self, search: Search, depart: dt.date, currency: str) -> Offer | None:
         market = self.MARKETS.get(currency)
         if market is None:
             raise EngineError(f"{self.key} prices by market; none mapped for {currency}.")
         ret = search.return_of(depart)
-        body = {"origin": search.origin, "destination": search.destination,
-                "departure_date": depart.isoformat(), "return_date": ret.isoformat(),
-                "adults": search.adults, "cabin_class": "economy", "market": market}
+        body = {
+            "origin": search.origin,
+            "destination": search.destination,
+            "departure_date": depart.isoformat(),
+            "return_date": ret.isoformat(),
+            "adults": search.adults,
+            "cabin_class": "economy",
+            "market": market,
+        }
         if search.max_stops is not None and search.max_stops <= 2:
             body["max_stops"] = search.max_stops
         if search.airlines:
@@ -468,10 +577,17 @@ class IgnavEngine(Engine):
             carriers = [s.get("marketing_carrier_code", "") for s in out + back]
             if not search.accepts(carriers, stops):
                 continue
-            found.append(Offer(currency, depart, ret, float(price["amount"]),
-                               airline=_carriers(carriers), stops=stops,
-                               out_dep_time=str(out[0].get("departure_time_local", ""))[11:16]
-                               or "--:--"))
+            found.append(
+                Offer(
+                    currency,
+                    depart,
+                    ret,
+                    float(price["amount"]),
+                    airline=_carriers(carriers),
+                    stops=stops,
+                    out_dep_time=str(out[0].get("departure_time_local", ""))[11:16] or "--:--",
+                )
+            )
         return _cheapest(found)
 
 
@@ -479,21 +595,31 @@ class SerpApiEngine(Engine):
     key = "serpapi"
     label = "Google Flights via SerpApi"
     cost = "250 free searches/month"
-    about = ("Google Flights results through a maintained scraping API. One search "
-             "per date and currency; the free plan also caps 50/hour, so use a 3+ day "
-             "step and one currency.")
+    about = (
+        "Google Flights results through a maintained scraping API. One search "
+        "per date and currency; the free plan also caps 50/hour, so use a 3+ day "
+        "step and one currency."
+    )
     key_env = "SERPAPI_KEY"
     signup_url = "https://serpapi.com/users/sign_up"
     URL = "https://serpapi.com/search.json"
-    STOPS = {None: 0, 0: 1, 1: 2, 2: 3}       # SerpApi: 0 any, 1 nonstop, 2 <=1, 3 <=2
+    STOPS = {None: 0, 0: 1, 1: 2, 2: 3}  # SerpApi: 0 any, 1 nonstop, 2 <=1, 3 <=2
 
     def fetch(self, search: Search, depart: dt.date, currency: str) -> Offer | None:
         ret = search.return_of(depart)
-        params = {"engine": "google_flights", "type": 1, "hl": "en",
-                  "departure_id": search.origin, "arrival_id": search.destination,
-                  "outbound_date": depart.isoformat(), "return_date": ret.isoformat(),
-                  "currency": currency, "adults": search.adults,
-                  "stops": self.STOPS.get(search.max_stops, 0), "api_key": self.api_key}
+        params = {
+            "engine": "google_flights",
+            "type": 1,
+            "hl": "en",
+            "departure_id": search.origin,
+            "arrival_id": search.destination,
+            "outbound_date": depart.isoformat(),
+            "return_date": ret.isoformat(),
+            "currency": currency,
+            "adults": search.adults,
+            "stops": self.STOPS.get(search.max_stops, 0),
+            "api_key": self.api_key,
+        }
         if search.airlines:
             params["include_airlines"] = ",".join(search.airlines)
         data = self._get_json(self.URL, params)
@@ -514,18 +640,33 @@ class SerpApiEngine(Engine):
             if not search.accepts(carriers, stops):
                 continue
             dep = str((legs[0].get("departure_airport") or {}).get("time", ""))
-            found.append(Offer(currency, depart, ret, float(it["price"]),
-                               airline=_carriers(carriers), stops=stops,
-                               out_dep_time=dep[11:16] or "--:--"))
+            found.append(
+                Offer(
+                    currency,
+                    depart,
+                    ret,
+                    float(it["price"]),
+                    airline=_carriers(carriers),
+                    stops=stops,
+                    out_dep_time=dep[11:16] or "--:--",
+                )
+            )
         return _cheapest(found)
 
 
 # --------------------------------------------------------------------------- #
 # Registry and sweep
 # --------------------------------------------------------------------------- #
-ENGINES: dict[str, type[Engine]] = {e.key: e for e in (
-    GoogleCalendarEngine, GoogleScrapeEngine, TravelpayoutsEngine, IgnavEngine, SerpApiEngine,
-)}
+ENGINES: dict[str, type[Engine]] = {
+    e.key: e
+    for e in (
+        GoogleCalendarEngine,
+        GoogleScrapeEngine,
+        TravelpayoutsEngine,
+        IgnavEngine,
+        SerpApiEngine,
+    )
+}
 AUTO = "auto"
 # Free engines only: "auto" never spends a paid quota.
 AUTO_ORDER = ["google-calendar", "google-scrape", "travelpayouts"]
@@ -535,14 +676,19 @@ AUTO_ORDER = ["google-calendar", "google-scrape", "travelpayouts"]
 class SweepResult:
     offers: list[Offer] = field(default_factory=list)
     errors: int = 0
-    engine: str = ""        # engine key(s) that supplied offers, "+"-joined
-    failure: str = ""       # why currencies are missing (EngineError), if they are
+    engine: str = ""  # engine key(s) that supplied offers, "+"-joined
+    failure: str = ""  # why currencies are missing (EngineError), if they are
 
 
-def sweep(search: Search, engine: str = AUTO, *, api_keys: dict[str, str] | None = None,
-          stop: threading.Event | None = None,
-          on_engine: Callable[[str], None] | None = None,
-          on_offer: Callable[[Offer], None] | None = None) -> SweepResult:
+def sweep(
+    search: Search,
+    engine: str = AUTO,
+    *,
+    api_keys: dict[str, str] | None = None,
+    stop: threading.Event | None = None,
+    on_engine: Callable[[str], None] | None = None,
+    on_offer: Callable[[Offer], None] | None = None,
+) -> SweepResult:
     """Run one engine over the search window -- or "auto": the free engines in
     order, each covering the currencies the previous ones found nothing for.
 

@@ -41,14 +41,34 @@ try:
     from PySide6.QtCore import QDate, QObject, Qt, QTimer, QUrl, Signal, Slot
     from PySide6.QtGui import QCloseEvent, QColor, QDesktopServices, QFont
     from PySide6.QtWidgets import (
-        QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QGridLayout,
-        QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-        QPlainTextEdit, QPushButton, QSpinBox, QStatusBar, QTableWidget, QTableWidgetItem,
-        QVBoxLayout, QWidget,
+        QAbstractItemView,
+        QApplication,
+        QCheckBox,
+        QComboBox,
+        QDateEdit,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QLineEdit,
+        QMainWindow,
+        QMessageBox,
+        QPlainTextEdit,
+        QPushButton,
+        QSpinBox,
+        QStatusBar,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
     )
 except ImportError:
-    print("PySide6 is required for the GUI. Install it with:\n"
-          "    python -m pip install -r requirements.txt", file=sys.stderr)
+    print(
+        "PySide6 is required for the GUI. Install it with:\n"
+        "    python -m pip install -r requirements.txt",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 import flight_monitor as fm
@@ -56,10 +76,21 @@ from engines import AUTO, AUTO_ORDER, ENGINES, Offer, Search
 
 # (code, name); the combo also takes typed codes, e.g. "KL,AF".
 AIRLINES = [
-    ("", "Any airline"), ("KL", "KLM"), ("AF", "Air France"), ("LA", "LATAM"),
-    ("TP", "TAP Air Portugal"), ("IB", "Iberia"), ("UX", "Air Europa"), ("LH", "Lufthansa"),
-    ("LX", "SWISS"), ("BA", "British Airways"), ("AZ", "ITA Airways"),
-    ("TK", "Turkish Airlines"), ("EK", "Emirates"), ("AD", "Azul"), ("G3", "GOL"),
+    ("", "Any airline"),
+    ("KL", "KLM"),
+    ("AF", "Air France"),
+    ("LA", "LATAM"),
+    ("TP", "TAP Air Portugal"),
+    ("IB", "Iberia"),
+    ("UX", "Air Europa"),
+    ("LH", "Lufthansa"),
+    ("LX", "SWISS"),
+    ("BA", "British Airways"),
+    ("AZ", "ITA Airways"),
+    ("TK", "Turkish Airlines"),
+    ("EK", "Emirates"),
+    ("AD", "Azul"),
+    ("G3", "GOL"),
 ]
 STOPS = [("Direct only", "0"), ("Up to 1 stop", "1"), ("Up to 2 stops", "2"), ("Any", "any")]
 CURRENCIES = ["EUR", "BRL"]
@@ -102,10 +133,10 @@ class _QueueHandler(logging.Handler):
 class SearchController(QObject):
     """Runs one monitor run at a time in a daemon thread; re-emits its events on Qt's thread."""
 
-    log_record = Signal(object)        # logging.LogRecord
-    engine_started = Signal(str)       # engine key ("auto" may try several)
-    offer_found = Signal(object)       # engines.Offer
-    finished = Signal(object)          # flight_monitor.RunResult
+    log_record = Signal(object)  # logging.LogRecord
+    engine_started = Signal(str)  # engine key ("auto" may try several)
+    offer_found = Signal(object)  # engines.Offer
+    finished = Signal(object)  # flight_monitor.RunResult
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -128,8 +159,12 @@ class SearchController(QObject):
         if self.is_running:
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, args=(search, engine, options),
-                                        daemon=True, name="flight-monitor-search")
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(search, engine, options),
+            daemon=True,
+            name="flight-monitor-search",
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -144,17 +179,26 @@ class SearchController(QObject):
     def _run(self, search: Search, engine: str, options: dict) -> None:
         put = self._events.put_nowait
         try:
-            result = fm.run_monitor(search, engine, stop=self._stop,
-                                    on_engine=lambda key: put(("engine", key)),
-                                    on_offer=lambda offer: put(("offer", offer)), **options)
-        except Exception as e:      # a bug, not a price problem: report it, don't die
+            result = fm.run_monitor(
+                search,
+                engine,
+                stop=self._stop,
+                on_engine=lambda key: put(("engine", key)),
+                on_offer=lambda offer: put(("offer", offer)),
+                **options,
+            )
+        except Exception as e:  # a bug, not a price problem: report it, don't die
             fm.log(f"Run crashed: {e!r}")
             result = fm.RunResult(search, engine=engine, failure=f"Run crashed: {e}")
         put(("done", result))
 
     def _drain(self) -> None:
-        signals = {"log": self.log_record, "engine": self.engine_started,
-                   "offer": self.offer_found, "done": self.finished}
+        signals = {
+            "log": self.log_record,
+            "engine": self.engine_started,
+            "offer": self.offer_found,
+            "done": self.finished,
+        }
         while True:
             try:
                 kind, payload = self._events.get_nowait()
@@ -169,7 +213,7 @@ class SearchController(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Flight Monitor")
+        self.setWindowTitle(f"Flight Monitor {fm.__version__}")
         self.setMinimumWidth(820)
 
         self._controller = SearchController(self)
@@ -305,13 +349,15 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(box)
 
         self._email_check = QCheckBox("Email report to")
-        self._email_edit = QLineEdit(os.environ.get("REPORT_EMAIL")
-                                     or os.environ.get("GMAIL_USER", ""))
+        self._email_edit = QLineEdit(
+            os.environ.get("REPORT_EMAIL") or os.environ.get("GMAIL_USER", "")
+        )
         self._history_check = QCheckBox("Add to history")
         self._history_check.setToolTip(
             "Append this run to data\\price_history.csv and run_summary.csv, which set the\n"
             "traffic-light baseline. The scheduled run always does; leave off for one-off\n"
-            "searches on other routes.")
+            "searches on other routes."
+        )
         self._low_spin = self._spin(0, 50000, "", prefix="€ ")
         self._high_spin = self._spin(0, 50000, "", prefix="€ ")
 
@@ -335,8 +381,10 @@ class MainWindow(QMainWindow):
         row.addWidget(self._status, stretch=1)
 
         self._save_btn = QPushButton("Save as default")
-        self._save_btn.setToolTip("Write these settings to data\\settings.json: the scheduled\n"
-                                  "run and the next GUI start use them.")
+        self._save_btn.setToolTip(
+            "Write these settings to data\\settings.json: the scheduled\n"
+            "run and the next GUI start use them."
+        )
         self._save_btn.clicked.connect(self._save_defaults)
         row.addWidget(self._save_btn)
 
@@ -454,8 +502,9 @@ class MainWindow(QMainWindow):
             "end": _pydate(self._end_edit.date()).isoformat(),
             "stay_days": self._stay_spin.value(),
             "step_days": self._step_spin.value(),
-            "currencies": ",".join(c for c, chk in self._currency_checks.items()
-                                   if chk.isChecked()),
+            "currencies": ",".join(
+                c for c, chk in self._currency_checks.items() if chk.isChecked()
+            ),
             "engine": self._engine_combo.currentData(),
             "low_eur": float(self._low_spin.value()),
             "high_eur": float(self._high_spin.value()),
@@ -466,12 +515,17 @@ class MainWindow(QMainWindow):
         v = self._values()
         if not v["currencies"]:
             raise ValueError("pick at least one currency")
-        return fm.build_search(v["origin"], v["destination"], fm.parse_airlines(v["airline"]),
-                               fm.parse_stops(v["max_stops"]),
-                               dt.date.fromisoformat(v["start"]),
-                               dt.date.fromisoformat(v["end"]),
-                               v["stay_days"], v["step_days"],
-                               fm.parse_currencies(v["currencies"]))
+        return fm.build_search(
+            v["origin"],
+            v["destination"],
+            fm.parse_airlines(v["airline"]),
+            fm.parse_stops(v["max_stops"]),
+            dt.date.fromisoformat(v["start"]),
+            dt.date.fromisoformat(v["end"]),
+            v["stay_days"],
+            v["step_days"],
+            fm.parse_currencies(v["currencies"]),
+        )
 
     def _engine_key(self) -> str:
         return self._engine_combo.currentData()
@@ -488,10 +542,13 @@ class MainWindow(QMainWindow):
         self._key_edit.setEnabled(needs_key)
         self._key_edit.setText(os.environ.get(engine.key_env, "") if needs_key else "")
         self._key_edit.setPlaceholderText(
-            f"{engine.key_env}: saved to .env by Save as default" if needs_key
-            else "not needed for this engine")
-        self._signup_link.setText(f'<a href="{engine.signup_url}">Get a key</a>'
-                                  if needs_key else "")
+            f"{engine.key_env}: saved to .env by Save as default"
+            if needs_key
+            else "not needed for this engine"
+        )
+        self._signup_link.setText(
+            f'<a href="{engine.signup_url}">Get a key</a>' if needs_key else ""
+        )
         self._update_engine_info()
 
     @Slot()
@@ -504,16 +561,21 @@ class MainWindow(QMainWindow):
         except ValueError:
             search = None
         if engine is None:
-            about = ("Runs " + ", then ".join(ENGINES[k].label for k in AUTO_ORDER)
-                     + " (only with a token set), each one only for the currencies the "
-                       "previous found nothing for. Never touches a paid quota.")
+            about = (
+                "Runs "
+                + ", then ".join(ENGINES[k].label for k in AUTO_ORDER)
+                + " (only with a token set), each one only for the currencies the "
+                "previous found nothing for. Never touches a paid quota."
+            )
             cost = ENGINES[AUTO_ORDER[0]].requests_for(search) if search else 0
         else:
             about = engine.about
             cost = engine.requests_for(search) if search else 0
         if search:
-            about += (f"\nThis search: {dates} outbound date(s) × {currencies} currency(ies)"
-                      f" ≈ {cost} request(s).")
+            about += (
+                f"\nThis search: {dates} outbound date(s) × {currencies} currency(ies)"
+                f" ≈ {cost} request(s)."
+            )
         self._engine_about.setText(about)
 
     @Slot()
@@ -532,9 +594,11 @@ class MainWindow(QMainWindow):
         api_keys = {}
         if engine in ENGINES and ENGINES[engine].key_env:
             if not self._key_edit.text().strip():
-                QMessageBox.warning(self, "API key needed",
-                                    f"{ENGINES[engine].label} needs an API key "
-                                    f"({ENGINES[engine].key_env}).")
+                QMessageBox.warning(
+                    self,
+                    "API key needed",
+                    f"{ENGINES[engine].label} needs an API key ({ENGINES[engine].key_env}).",
+                )
                 return
             api_keys[engine] = self._key_edit.text().strip()
         recipient = self._email_edit.text().strip()
@@ -546,11 +610,16 @@ class MainWindow(QMainWindow):
         self._set_editing_enabled(False)
         self._search_btn.setText("Stop")
         self._set_status(RUNNING, f"Searching {search.label}…")
-        self._controller.start(search, engine, recipient=recipient,
-                               send=self._email_check.isChecked(),
-                               record=self._history_check.isChecked(),
-                               low_eur=float(self._low_spin.value()),
-                               high_eur=float(self._high_spin.value()), api_keys=api_keys)
+        self._controller.start(
+            search,
+            engine,
+            recipient=recipient,
+            send=self._email_check.isChecked(),
+            record=self._history_check.isChecked(),
+            low_eur=float(self._low_spin.value()),
+            high_eur=float(self._high_spin.value()),
+            api_keys=api_keys,
+        )
 
     @Slot()
     def _save_defaults(self) -> None:
@@ -565,8 +634,7 @@ class MainWindow(QMainWindow):
         if engine and engine.key_env and key and key != os.environ.get(engine.key_env, ""):
             fm.set_env_value(engine.key_env, key)
         fm.log(f"Saved defaults to {fm.SETTINGS_JSON}.")
-        self.statusBar().showMessage("Saved: the scheduled run and the next start use these.",
-                                     5000)
+        self.statusBar().showMessage("Saved: the scheduled run and the next start use these.", 5000)
 
     @Slot(str)
     def _on_engine_started(self, key: str) -> None:
@@ -574,16 +642,22 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _add_offer(self, offer: Offer) -> None:
-        stops = "" if offer.stops is None else ("direct" if offer.stops == 0 else
-                                                str(offer.stops))
-        cells = [offer.depart.isoformat(), offer.ret.isoformat(), offer.currency,
-                 round(offer.price), offer.airline, stops, offer.out_dep_time]
+        stops = "" if offer.stops is None else ("direct" if offer.stops == 0 else str(offer.stops))
+        cells = [
+            offer.depart.isoformat(),
+            offer.ret.isoformat(),
+            offer.currency,
+            round(offer.price),
+            offer.airline,
+            stops,
+            offer.out_dep_time,
+        ]
         self._table.setSortingEnabled(False)
         row = self._table.rowCount()
         self._table.insertRow(row)
         for col, value in enumerate(cells):
             item = QTableWidgetItem()
-            item.setData(Qt.ItemDataRole.DisplayRole, value)   # ints sort numerically
+            item.setData(Qt.ItemDataRole.DisplayRole, value)  # ints sort numerically
             item.setData(Qt.ItemDataRole.UserRole, offer)
             self._table.setItem(row, col, item)
         self._table.setSortingEnabled(True)
@@ -606,16 +680,24 @@ class MainWindow(QMainWindow):
             self._add_offer(offer)
         self._mark_cheapest(r)
         head = r.best.get("EUR") or next(iter(r.best.values()))
-        details = ", ".join(x for x in (
-            head.airline,
-            None if head.stops is None else ("direct" if head.stops == 0
-                                             else f"{head.stops} stop(s)"),
-            None if head.out_dep_time == "--:--" else head.out_dep_time) if x)
-        others = "  ".join(fm.money(o.currency, o.price) for o in r.best.values()
-                           if o is not head)
-        text = (f"{fm.money(head.currency, head.price)} out {head.depart}, back {head.ret}"
-                + (f" ({details})" if details else "") + (f"   {others}" if others else "")
-                + f"   via {fm.engine_label(r.engine)}")
+        details = ", ".join(
+            x
+            for x in (
+                head.airline,
+                None
+                if head.stops is None
+                else ("direct" if head.stops == 0 else f"{head.stops} stop(s)"),
+                None if head.out_dep_time == "--:--" else head.out_dep_time,
+            )
+            if x
+        )
+        others = "  ".join(fm.money(o.currency, o.price) for o in r.best.values() if o is not head)
+        text = (
+            f"{fm.money(head.currency, head.price)} out {head.depart}, back {head.ret}"
+            + (f" ({details})" if details else "")
+            + (f"   {others}" if others else "")
+            + f"   via {fm.engine_label(r.engine)}"
+        )
         if r.light:
             text = f"{r.light} · {text}"
         if r.new_low:

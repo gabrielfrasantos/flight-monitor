@@ -1,5 +1,8 @@
 # Flight Monitor — AMS ⇄ GRU, KLM direct
 
+[![CI](https://github.com/gabrielfrasantos/flight-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/gabrielfrasantos/flight-monitor/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/gabrielfrasantos/flight-monitor/actions/workflows/codeql.yml/badge.svg)](https://github.com/gabrielfrasantos/flight-monitor/actions/workflows/codeql.yml)
+
 Sweeps every outbound date **01-12-2026 → 28-01-2027** (step 1 day), each with a
 **15-night** return, **direct KLM only**, prices in **EUR and BRL**. Picks the
 lowest, classifies it with a **traffic light**, and **emails** the report.
@@ -160,13 +163,26 @@ quota, consent wall). A run with no offers still emails a `[WARN]` report.
 - `settings.json` — defaults saved by the GUI.
 - `monitor.log` — run log.
 
-## Tests
+## Development
 
 ```powershell
-python -m pytest
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest            # tests: no network, no API keys
+ruff check . ; ruff format . ; mypy
 ```
-The keyed engines (`travelpayouts`, `ignav`, `serpapi`) are tested against
-their documented response shapes, not live.
+CI (GitHub Actions) runs lint, format and type checks, then the tests on
+Windows and Linux for Python 3.10–3.13; CodeQL scans weekly and on PRs;
+Dependabot keeps dependencies and actions current. The keyed engines
+(`travelpayouts`, `ignav`, `serpapi`) are tested against their documented
+response shapes, not live.
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/)
+(`feat:`, `fix:`, `docs:`, `ci:`, …). On `main`, `release-please` opens a
+release PR that bumps the version (`pyproject.toml`, `flight_monitor.py`) and
+`CHANGELOG.md`; merging it tags the version and publishes a GitHub release.
+`python flight_monitor.py --version` shows the running version.
+
+Agent and contributor rules: [AGENTS.md](AGENTS.md).
 
 ## Caveats
 
