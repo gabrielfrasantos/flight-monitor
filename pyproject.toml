@@ -3,7 +3,7 @@
 # install with `pip install -r requirements.txt` (+ requirements-dev.txt).
 [project]
 name = "flight-monitor"
-version = "0.1.0"
+version = "0.1.1"
 description = "Round-trip flight price monitor with selectable price engines, email reports and a PySide6 GUI."
 readme = "README.md"
 license = "MIT"

@@ -57,7 +57,7 @@ from typing import Any
 
 from engines import AUTO, AUTO_ORDER, ENGINES, Offer, Search, sweep
 
-__version__ = "0.1.0"  # x-release-please-version
+__version__ = "0.1.1"  # x-release-please-version
 
 FROZEN = bool(getattr(sys, "frozen", False))
 
